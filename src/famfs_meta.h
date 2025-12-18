@@ -46,7 +46,8 @@
 #define FAMFS_SUPERBLOCK_SIZE FAMFS_LOG_OFFSET
 #define FAMFS_SUPERBLOCK_MAX_DAXDEVS 1
 
-#define FAMFS_ALLOC_UNIT 0x200000 /* 2MiB allocation unit */
+// #define FAMFS_ALLOC_UNIT 0x200000 /* 2MiB allocation unit */
+#define FAMFS_ALLOC_UNIT 0x1000 /* 4KiB allocation unit */
 
 STATIC_ASSERT(!(FAMFS_LOG_LEN & (FAMFS_LOG_LEN - 1)), FAMFS_LOG_LEN_must_be_power_of_2);
 STATIC_ASSERT(!(FAMFS_ALLOC_UNIT & (FAMFS_ALLOC_UNIT - 1)), FAMFS_ALLOC_UNIT_must_be_power_of_2);

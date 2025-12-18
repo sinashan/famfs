@@ -1210,7 +1210,7 @@ __famfs_mkmeta_log(
 	int rc;
 
 	assert(log_offset == 0x200000);
-	assert(log_size = 0x800000); /* XXX */
+	// assert(log_size = 0x800000); /* XXX */
 
 	strncat(dirpath, mpt,     PATH_MAX - 1);
 	strncat(dirpath, "/",     PATH_MAX - 1);
@@ -4210,63 +4210,68 @@ famfs_copy_file_data(
 			 MAP_SHARED, destfd, 0);
 	assert(cf->destp != MAP_FAILED);
 
+	close(cf->srcfd);
+	close(cf->destfd);
+	cf->srcfd = 0;
+	cf->destfd = 0;
+
 	/* if thpool_add_work returns an error, fall back */
-	if (lp->thp) {
-		size_t remainder, offset, this_chunk;
+	// if (lp->thp) {
+	// 	size_t remainder, offset, this_chunk;
 
-		remainder = size;
-		offset = 0;
-		cf->refcount = nchunks;
-		cf->nchunks = nchunks;
+	// 	remainder = size;
+	// 	offset = 0;
+	// 	cf->refcount = nchunks;
+	// 	cf->nchunks = nchunks;
 
-		/* With threaded cp, we can have hundreds or thousands of
-		 * source/destination pairs queued to be copied by the
-		 * threadpool. This runs us out of file descriptors. The
-		 * solution is to close the files when they get queued
-		 * to the threadpool; the first thread to start work on a
-		 * file pair will reopen them.
-		 * XXX could this still fail when copying a bazillion tiny
-		 * files? Perhaps...If that's what you're doing, use
-		 * 'famfs cp -t0' for now...
-		 */
+	// 	/* With threaded cp, we can have hundreds or thousands of
+	// 	 * source/destination pairs queued to be copied by the
+	// 	 * threadpool. This runs us out of file descriptors. The
+	// 	 * solution is to close the files when they get queued
+	// 	 * to the threadpool; the first thread to start work on a
+	// 	 * file pair will reopen them.
+	// 	 * XXX could this still fail when copying a bazillion tiny
+	// 	 * files? Perhaps...If that's what you're doing, use
+	// 	 * 'famfs cp -t0' for now...
+	// 	 */
 
-		close(cf->srcfd);
-		close(cf->destfd);
-		cf->srcfd = 0;
-		cf->destfd = 0;
+	// 	close(cf->srcfd);
+	// 	close(cf->destfd);
+	// 	cf->srcfd = 0;
+	// 	cf->destfd = 0;
 
-		if (verbose && nchunks > 1)
-			printf("famfs cp: %s: "
-			       "%ld bytes, %ld chunks in threaded copy\n",
-			       destname, size, nchunks);
+	// 	if (verbose && nchunks > 1)
+	// 		printf("famfs cp: %s: "
+	// 		       "%ld bytes, %ld chunks in threaded copy\n",
+	// 		       destname, size, nchunks);
 
-		for (; remainder > 0; ) {
-			cp = calloc(1, sizeof(*cp));
-			assert(cp);
+	// 	for (; remainder > 0; ) {
+	// 		cp = calloc(1, sizeof(*cp));
+	// 		assert(cp);
 
-			this_chunk = MIN(remainder, chunk_size);
+	// 		this_chunk = MIN(remainder, chunk_size);
 
-			cp->cf = cf;
-			cp->verbose = verbose;
+	// 		cp->cf = cf;
+	// 		cp->verbose = verbose;
 
-			cp->offset = offset;
-			cp->size = this_chunk;
+	// 		cp->offset = offset;
+	// 		cp->size = this_chunk;
 
-			/* cp is freed by __famfs_threaded_copy() */
-			if (mock_threadpool)
-				rc = __famfs_copy_file_data(cp);
-			else
-				rc = thpool_add_work(lp->thp,
-						     __famfs_threaded_copy,
-						     cp);
+	// 		/* cp is freed by __famfs_threaded_copy() */
+	// 		if (mock_threadpool)
+	// 			rc = __famfs_copy_file_data(cp);
+	// 		else
+	// 			rc = thpool_add_work(lp->thp,
+	// 					     __famfs_threaded_copy,
+	// 					     cp);
 
-			assert(rc == 0);
+	// 		assert(rc == 0);
 
-			remainder -= this_chunk;
-			offset += this_chunk;
-		}
-		return 0;
-	}
+	// 		remainder -= this_chunk;
+	// 		offset += this_chunk;
+	// 	}
+	// 	return 0;
+	// }
 
 	cp = calloc(1, sizeof(*cp));
 	assert(cp);
@@ -4347,7 +4352,6 @@ __famfs_cp(
 			"%s: -r not specified; omitting directory '%s'\n",
 			__func__, srcfile);
 		return 1;
-
 	default:
 		fprintf(stderr,
 			"%s: error: src %s is not a regular file\n",
@@ -4446,8 +4450,8 @@ famfs_cp(struct famfs_locked_log *lp,
 			strncpy(actual_destfile, destpath, PATH_MAX - 1);
 			break;
 		}
-		default:
-		strncpy(actual_destfile, destfile, PATH_MAX - 1);
+		default: 
+			strncpy(actual_destfile, destfile, PATH_MAX - 1);
 #if 0
 			fprintf(stderr, "%s: error: dest file (%s) exists "
 				"and is not a directory\n",
