@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 /*
- * Copyright (C) 2023-2024 Micron Technology, Inc.  All rights reserved.
+ * Copyright (C) 2023-2025 Micron Technology, Inc.  All rights reserved.
  */
 
 #include <stdio.h>
@@ -58,6 +58,7 @@ struct option global_options[] = {
 	 */
 	{"kill",        no_argument,       &kill_super,    'k'},
 	{"loglen",      required_argument, 0,              'l'},
+	{"nodax",       no_argument,       0,              'D'},
 	{0, 0, 0, 0}
 };
 
@@ -66,8 +67,9 @@ main(int argc, char *argv[])
 {
 	int c;
 	int rc = 0;
-	char *daxdev = NULL;
 	int force = 0;
+	int nodax = 0;
+	char *daxdev = NULL;
 	u64 loglen = 0x800000;
 
 	/* Process global options, if any */
@@ -75,7 +77,7 @@ main(int argc, char *argv[])
 	 * to return -1 when it sees something that is not recognized option
 	 * (e.g. the command that will mux us off to the command handlers
 	 */
-	while ((c = getopt_long(argc, argv, "+fkl:h?",
+	while ((c = getopt_long(argc, argv, "+fkl:Dh?",
 				global_options, &optind)) != EOF) {
 		char *endptr;
 		s64 mult;
@@ -96,6 +98,9 @@ main(int argc, char *argv[])
 				loglen *= mult;
 			printf("loglen: %lld\n", loglen);
 			break;
+		case 'D':
+			nodax = 1;
+			break;
 		case 'h':
 		case '?':
 			print_usage(argc, argv);
@@ -105,7 +110,7 @@ main(int argc, char *argv[])
 
 	if (optind >= argc) {
 		fprintf(stderr, "mkfs.famfs: must specify memory device\n");
-		return -1;
+		return 1;
 	}
 
 	/* TODO: multiple devices? */
@@ -114,13 +119,14 @@ main(int argc, char *argv[])
 	famfs_log_enable_syslog("famfs", LOG_PID | LOG_CONS, LOG_DAEMON);
 	famfs_log(FAMFS_LOG_NOTICE, "Starting famfs mkfs on device %s", daxdev);
 
-	rc = famfs_mkfs(daxdev, loglen, kill_super, force);
+	rc = famfs_mkfs(daxdev, loglen, kill_super, nodax, force);
 	if (rc == 0)
-		famfs_log(FAMFS_LOG_NOTICE, "mkfs %scommand successful on device %s",
-			       (kill_super && force) ? "-k -f " : "", daxdev);
+		famfs_log(FAMFS_LOG_NOTICE,
+			  "mkfs %s command successful on device %s",
+			  (kill_super && force) ? "-k -f " : "", daxdev);
 	else
 		famfs_log(FAMFS_LOG_ERR, "mkfs failed on device %s", daxdev);
 
 	famfs_log_close_syslog();
-	return rc;
+	return (rc) ? 2:0;
 }

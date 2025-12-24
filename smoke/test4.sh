@@ -1,200 +1,149 @@
 #!/usr/bin/env bash
 
-cwd=$(pwd)
+set -euo pipefail
 
-# Defaults
-VG=""
-SCRIPTS=../scripts
-RAW_MOUNT_OPTS="-t famfs -o noatime -o dax=always "
-BIN=../debug
-VALGRIND_ARG="valgrind --leak-check=full --show-leak-kinds=all --track-origins=yes"
-RMMOD=0
-FAMFS_MOD="famfs.ko"
-
-# Allow these variables to be set from the environment
-if [ -z "$DEV" ]; then
-    DEV="/dev/dax0.0"
-fi
-if [ -z "$MPT" ]; then
-    MPT=/mnt/famfs
-fi
-if [ -z "$UMOUNT" ]; then
-    UMOUNT="umount"
-fi
-if [ -z "${FAMFS_MODE}" ]; then
-    FAMFS_MODE="v1"
-fi
-
-# Override defaults as needed
-while (( $# > 0)); do
-    flag="$1"
-    shift
-    case "$flag" in
-	(-M|--module)
-	    FAMFS_MOD=$1
-	    shift
-	    ;;
-	(-d|--device)
-	    DEV=$1
-	    shift;
-	    ;;
-	(-b|--bin)
-	    BIN=$1
-	    shift
-	    ;;
-	(-s|--scripts)
-	    SCRIPTS=$1
-	    source_root=$1;
-	    shift;
-	    ;;
-	(-m|--mode)
-	    FAMFS_MODE="$1"
-	    shift
-	    ;;
-	(-v|--valgrind)
-	    # no argument to -v; just setup for Valgrind
-	    VG=${VALGRIND_ARG}
-	    ;;
-	(-n|--no-rmmod)
-	    RMMOD=0
-	    ;;
-	*)
-	    echo "Unrecognized command line arg: $flag"
-	    ;;
-
-    esac
-done
-
-if [[ "$FAMFS_MODE" == "v1" || "$FAMFS_MODE" == "fuse" ]]; then
-    echo "FAMFS_MODE: $FAMFS_MODE"
-    if [[ "$FAMFS_MODE" == "fuse" ]]; then
-        MOUNT_OPTS="--fuse" # Can drop this b/c fuse is the default
-    else
-        MOUNT_OPTS="--nofuse" # Can drop this b/c fuse is the default
-    fi
-else
-    echo "FAMFS_MODE: invalid"
-    exit 1;
-fi
-
-MOUNT="sudo $VG $BIN/famfs mount $MOUNT_OPTS"
-MKFS="sudo $VG $BIN/mkfs.famfs"
-CLI="sudo $VG $BIN/famfs"
-CLI_NOSUDO="$VG $BIN/famfs"
 TEST="test4"
 
-source $SCRIPTS/test_funcs.sh
-# Above this line should be the same for all smoke tests
+source smoke/test_header.sh
+source "$SCRIPTS/test_funcs.sh"
 
-MULTICHASE="sudo $BIN/src/multichase/multichase"
+start_test $TEST
 
-set -x
+# multichase binary (array form)
+MULTICHASE=(sudo "$BIN/src/multichase/multichase")
 
-# Start with a clean, empty file systeem
+# Start with a clean, empty file system
 famfs_recreate "test4"
+verify_mounted "$DEV" "$MPT" "test4.sh"
 
-verify_mounted $DEV $MPT "test4.sh"
+expect_fail   "${CLI[@]}" badarg                        -- "create badarg should fail"
+expect_good   "${CLI[@]}" creat -h                      -- "creat -h should succeed"
+expect_good   "${CLI[@]}" creat -s 3g      "$MPT/memfile"   -- "create memfile for multichase"
+expect_good   "${CLI[@]}" creat -s 100m    "$MPT/memfile1"  -- "creat should succeed with -s 100m"
+expect_good   "${CLI[@]}" creat -s 10000k  "$MPT/memfile2"  -- "creat with -s 10000k should succeed"
 
-${CLI} badarg                            && fail "create badarg should fail"
-${CLI} creat  -h                         || fail "creat -h should succeed"
-${CLI} creat -s 3g  ${MPT}/memfile       || fail "can't create memfile for multichase"
-${CLI} creat -s 100m ${MPT}/memfile1     || fail "creat should succeed with -s 100m"
-${CLI} creat -s 10000k ${MPT}/memfile2   || fail "creat with -s 10000k should succeed"
+expect_good   "${MULTICHASE[@]}" -d "$MPT/memfile" -m 2900m \
+              -- "multichase run"
 
-${MULTICHASE} -d ${MPT}/memfile -m 2900m || fail "multichase fail"
+verify_mounted "$DEV" "$MPT" "test4.sh mounted"
+expect_good sudo "$UMOUNT" "$MPT"                        -- "umount"
+verify_not_mounted "$DEV" "$MPT" "test4.sh"
 
-verify_mounted $DEV $MPT "test4.sh mounted"
-sudo $UMOUNT $MPT || fail "test4.sh umount"
-verify_not_mounted $DEV $MPT "test4.sh"
-
-# Test shadow logplay while the fs is not mounted
+#
+# Shadow logplay tests while unmounted
+#
 SHADOWPATH=/tmp/shadowpath/root
-${CLI} logplay --shadow -d /dev/bogodax && fail "shadow logplay should fail with bogus daxdev"
-sudo rm -rf $SHADOWPATH
-${CLI} logplay --shadow $SHADOWPATH/frob --daxdev $DEV -vv && \
-    fail "shadow logplay to nonexistent shadow dir should fail if parent doesn't exist"
-${CLI} logplay --daxdev $DEV -vv  $SHADOWPATH && \
-    fail "logplay should fail if --daxdev is set without --shadow"
 
-sudo rm -rf $SHADOWPATH
-sudo mkdir -p $SHADOWPATH
-${CLI} logplay --shadow $SHADOWPATH --daxdev $DEV -vv || \
-    fail "shadow logplay to existing shadow dir should succeed"
-${CLI} logplay --shadow $SHADOWPATH --daxdev $DEV -vv || \
-    fail "redo shadow logplay to existing shadow dir should succeed"
+expect_fail   "${CLI[@]}" logplay --shadow -d /dev/bogodax \
+              -- "shadow logplay should fail with bogus daxdev"
 
-# Double shadow arg means re-parse yaml to test (if the shadow files are not already present)
-sudo rm -rf $SHADOWPATH
+expect_good sudo rm -rf "$SHADOWPATH"
 
-${CLI} logplay --shadow $SHADOWPATH --shadow $SHADOWPATH --daxdev $DEV  -vv && \
-    fail "shadow logplay with yaml test with duplicate shadowpaths should fail"
+expect_fail   "${CLI[@]}" logplay --shadow "$SHADOWPATH/frob" --daxdev "$DEV" -vv \
+              -- "shadow logplay to nonexistent shadow dir should fail if parent doesn't exist"
 
-#TODO: add some bad yaml to the yaml tree to test failures (or maybe do this in unit tests?
+expect_fail   "${CLI[@]}" logplay --daxdev "$DEV" -vv "$SHADOWPATH" \
+              -- "logplay should fail if --daxdev is set without --shadow"
+
+expect_good sudo rm -rf "$SHADOWPATH"
+expect_good sudo mkdir -p "$SHADOWPATH"
+
+expect_good   "${CLI[@]}" logplay --shadow "$SHADOWPATH" --daxdev "$DEV" -vv \
+              -- "shadow logplay to existing shadow dir should succeed"
+
+expect_good   "${CLI[@]}" logplay --shadow "$SHADOWPATH" --daxdev "$DEV" -vv \
+              -- "redo shadow logplay should also succeed"
+
+sudo rm -rf "$SHADOWPATH"
+
+expect_fail   "${CLI[@]}" logplay --shadow "$SHADOWPATH" --shadow "$SHADOWPATH" \
+              --daxdev "$DEV" -vv \
+              -- "duplicate --shadow should fail"
 
 #
-# Test cli 'famfs mount'
+# famfs mount tests
 #
-# Second mount causes fubar on 6.7, but fails as it should on 6.5 TODO: fix it!!
-${MOUNT} -vvv $DEV $MPT || fail "famfs mount should succeed when not mounted"
-${MOUNT} -vvv $DEV $MPT 2>/dev/null && fail "famfs mount should fail when already mounted"
+expect_good   "${MOUNT[@]}" -vvv "$DEV" "$MPT" -- "mount should succeed"
+expect_fail   "${MOUNT[@]}" -vvv "$DEV" "$MPT" \
+              -- "mount should fail when already mounted"
 
-verify_mounted $DEV $MPT "test4.sh remount"
+verify_mounted "$DEV" "$MPT" "test4.sh remount"
 
-sudo mkdir ${SHADOWPATH}
-${CLI} logplay --shadow $SHADOWPATH --shadowtest $MPT  -vv || \
-    fail "shadow logplay from mounted meta files should succeed"
+sudo mkdir -p "$SHADOWPATH"
+expect_good   "${CLI[@]}" logplay --shadow "$SHADOWPATH" --shadowtest "$MPT" -vv \
+              -- "shadow logplay from mounted metadata"
 
-# check that a removed file is restored on remount
+#
+# File deletion / restoration test
+#
 F="$MPT/test_xfile"
-${CLI} creat -s 16m -r -S 42 $F || fail "failed to create F ($F)"
-sudo rm $F
-sudo $UMOUNT $MPT            || fail "umount failed"
+expect_good   "${CLI[@]}" creat -s 16m -r -S 42 "$F" -- "failed to create F"
+set +e
+sudo rm "$F" # no 'expect...' - works with v1 and not with fuse
+set -e
 
-verify_not_mounted $DEV $MPT "test4.sh 2nd umount"
+expect_good   sudo "$UMOUNT" "$MPT" -- "umount"
+verify_not_mounted "$DEV" "$MPT" "test4.sh second umount"
 
+#
+# mount argument validation
+#
+expect_good   "${MOUNT[@]}" -?    -- "mount -? should succeed"
+expect_fail   "${MOUNT[@]}"       -- "mount with no args should fail"
+expect_fail   "${MOUNT[@]}" a b c -- "mount with too many args should fail"
+expect_fail   "${MOUNT[@]}" baddev "$MPT" -- "bad device"
+expect_fail   "${MOUNT[@]}" "$DEV" badmpt -- "bad mountpoint"
 
-${MOUNT} -?             || fail "famfs mount -? should succeed"
-${MOUNT}                && fail "famfs mount with no args should fail"
-${MOUNT}  a b c         && fail "famfs mount with too many args should fail"
-${MOUNT} baddev $MPT    && fail "famfs mount with bad device path should fail"
-${MOUNT} $DEV badmpt    && fail "famfs mount with bad mount point path should fail"
+verify_not_mounted "$DEV" "$MPT" "test4 bad mount attempts"
 
+expect_fail   "${MOUNT[@]}" -rm -vvv "$DEV" "$MPT" \
+              -- "mount with -r and -m should fail"
 
-verify_not_mounted $DEV $MPT "test4.sh various bad mount attempts"
+expect_good   "${MOUNT[@]}" -r -vvv "$DEV" "$MPT" \
+              -- "mount -r should succeed"
 
-${MOUNT} -rm -vvv $DEV $MPT && fail "famfs mount with -r and -m should fail"
-${MOUNT} -r -vvv $DEV $MPT  || fail "famfs mount 2 should succeed when not mounted"
-verify_mounted $DEV $MPT "test4.sh 2nd remount"
+verify_mounted "$DEV" "$MPT" "test4.sh 2nd remount"
 
-sudo test -f $F             || fail "bogusly deleted file did not reappear on remount"
-${CLI} verify -S 42 -f $F
-sudo $UMOUNT $MPT            || fail "umount should succeed"
-if [[ "${FAMFS_MODE}" == "v1" ]]; then
-    if ((RMMOD > 0)); then
-	sudo rmmod ${FAMFS_MOD}     || fail "could not unload famfs when unmoounted"
-	${MOUNT} -vvv $DEV $MPT && fail "famfs mount should fail when kmod not loaded"
-	sudo modprobe ${FAMFS_MOD}  || fail "modprobe"
+expect_good   sudo test -f "$F" \
+              -- "deleted file restored after remount"
+
+expect_good sudo "$UMOUNT" "$MPT" -- "final umount"
+
+#
+# kmod unload tests (v1 only)
+#
+if [[ "$FAMFS_MODE" == "v1" ]]; then
+    if (( RMMOD > 0 )); then
+        expect_good sudo rmmod "$FAMFS_MOD"  -- "unload famfs"
+        expect_fail "${MOUNT[@]}" -vvv "$DEV" "$MPT" \
+                    -- "mount should fail when module is unloaded"
+        expect_good sudo modprobe "$FAMFS_MOD" -- "reload module"
     fi
 fi
-${MOUNT} -vv $DEV $MPT      || fail "famfs mount should succeed after kmod reloaded"
 
-#TODO troubleshoot remount
-if [[ "${FAMFS_MODE}" == "v1" ]]; then
-    ${MOUNT} -R $DEV $MPT   || fail "famfs mount -R should succeed when nothing is hinky"
+expect_good "${MOUNT[@]}" -vv "$DEV" "$MPT" \
+            -- "mount after reload"
+
+if [[ "$FAMFS_MODE" == "v1" ]]; then
+    expect_good "${MOUNT[@]}" -R "$DEV" "$MPT" \
+                -- "mount -R should succeed when clean"
 fi
-# mount -R needs mkmeta cleanup...
 
-SHADOW_TARGET=~/smoke.shadow
+#
+# final shadow logplay
+#
+SHADOW_TARGET=/tmp/smoke.shadow
 THIS_SHADOW=test4.shadow
-SH=${SHADOW_TARGET}/${THIS_SHADOW}
-mkdir -p ${SHADOW_TARGET}
-rm -rf $SH
-${CLI} logplay --shadow $SH $MPT
+SH="$SHADOW_TARGET/$THIS_SHADOW"
 
-sudo $UMOUNT $MPT # run_smoke.sh expects the file system unmounted after this test
+expect_good sudo rm -rf "$SH"          -- "cleanup old shadow"
+expect_good sudo mkdir -p "$SH/root"   -- "mkdir shadow tree"
+
+expect_good "${CLI[@]}" logplay -Ss "$SH" "$MPT" \
+            -- "shadow logplay should work"
+
+sudo "$UMOUNT" "$MPT"
 
 set +x
-echo ":==*************************************************************************"
-echo ":==test4 (multichase) completed successfully"
-echo ":==*************************************************************************"
+finish_test $TEST
 exit 0

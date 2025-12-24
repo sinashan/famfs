@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 /*
- * Copyright (C) 2023-2024 Micron Technology, Inc.  All rights reserved.
+ * Copyright (C) 2023-2025 Micron Technology, Inc.  All rights reserved.
  */
 
 #define _GNU_SOURCE
@@ -711,6 +711,7 @@ famfs_file_strided_alloc(
 			mu_print_bitmap(lp->bitmap, lp->nbits);
 		}
 
+		bucket_series_destroy(bs);
 		return -ENOMEM;
 	}
 	/* We only support single-interleaved-extent (but multi-strip) alloc: */

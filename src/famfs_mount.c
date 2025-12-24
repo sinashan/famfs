@@ -220,7 +220,7 @@ famfs_path_is_mount_pt(
 			if (strlen(opts) <= strlen("shadow="))
 				continue; 
 
- 			xmpt = realpath(mpt, NULL);
+			xmpt = realpath(mpt, NULL);
 			if (!xmpt) {
 				fprintf(stderr, "realpath(%s) errno %d\n",
 					mpt, errno);
@@ -389,7 +389,7 @@ char *find_mount_point(const char *path)
 	if (fs.f_fsid.__val[0] == root_fs.f_fsid.__val[0] &&
 	    fs.f_fsid.__val[1] == root_fs.f_fsid.__val[1]) {
 		free(current_path);
-		return strdup("/");  // It's the root file system
+		return strdup("/");  /* It's the root file system */
 	}
 
 	/* Ascend the directory tree to find the mount point */
@@ -413,7 +413,7 @@ char *find_mount_point(const char *path)
 		if (parent_fs.f_fsid.__val[0] != fs.f_fsid.__val[0] ||
 		    parent_fs.f_fsid.__val[1] != fs.f_fsid.__val[1] ||
 		    parent_st.st_dev != st.st_dev) {
-			break;  // We have found the mount point
+			break;  /* We have found the mount point */
 		}
 
 		/* Move up if still the same file system */
@@ -425,7 +425,7 @@ char *find_mount_point(const char *path)
 		}
 	}
 
-	return current_path;  // This is the mount point path
+	return current_path;  /* This is the mount point path */
 }
 
 static int is_directory(const char *path)
@@ -561,7 +561,7 @@ famfs_start_fuse_daemon(
 	if (pid > 0) {
 		famfs_log(FAMFS_LOG_DEBUG, "%s: pid=%d\n", __func__, pid);
 		if (debug)
-			printf("%s: pid=%d\n", __func__, pid);
+			printf("%s: famfs_fused pid=%d\n", __func__, pid);
 
 		return 0;
 	}
@@ -632,8 +632,8 @@ famfs_start_fuse_daemon(
 static char *
 gen_shadow_dir(void)
 {
-	char template[] = "/tmp/famfs_shadow_XXXXXX";  /* Must end with XXXXXX */
-	char *shadow = mkdtemp(template);  /* Generates a dir with unique name */
+	char template[] = "/tmp/famfs_shadow_XXXXXX"; /* Must end with XXXXXX */
+	char *shadow = mkdtemp(template);  /* Creates a dir with unique name */
 
 	if (!shadow || shadow[0] == '\0') {
 		fprintf(stderr,
@@ -645,6 +645,76 @@ gen_shadow_dir(void)
 	return strdup(shadow );
 }
 
+static char *
+gen_dummy_mpt(void)
+{
+	char template[] = "/tmp/famfs_dummy_XXXXXX";  /* Must end with XXXXXX */
+	char *shadow = mkdtemp(template); /* Creates a dir with unique name */
+
+	if (!shadow || shadow[0] == '\0') {
+		fprintf(stderr,
+			"%s: Err %d failed to generate shadow path (%s)\n",
+			__func__, errno, template);
+		return NULL;
+	}
+
+	return strdup(shadow );
+}
+
+/**
+ * famfs_umount() - unmount with retry on EBUSY
+ *
+ * @mpt: mount point to unmount
+ *
+ * Retries umount up to 5 times with increasing delays if EBUSY is returned.
+ *
+ * Returns 0 on success, -1 on failure (errno is preserved from last attempt)
+ */
+int
+famfs_umount(const char *mpt)
+{
+	int max_retries = 10;
+	int delay_ms = 100;
+	int rc;
+	int i;
+
+	for (i = 0; i < max_retries; i++) {
+		rc = umount(mpt);
+		if (rc == 0)
+			return 0;
+
+		if (errno != EBUSY)
+			return -1;
+
+		printf("%s: retry %d\n", __func__, i + 1);
+		/* EBUSY - wait and retry */
+		if (i < max_retries - 1) {
+			usleep(delay_ms * 1000);
+			delay_ms *= 2; /* exponential backoff */
+		}
+	}
+
+	/* All retries exhausted */
+	return -1;
+}
+
+/**
+ * famfs_mount_fuse() - mount a famfs file system via fuse
+ *
+ * @realdaxdev
+ * @realmpt
+ * @realshadow
+ * @timeout
+ * @logplay_use_mmap
+ * @useraccess
+ * @default_perm
+ * @bounce_dax       - Disable and re-enable daxdev before proceeding with mount
+ * @dummy            - Perform a mount and create meta files but don't verify
+ *                     superblock and log, and don't play the log.
+ * @dummy_log_size   - Size of log file for dummy mount
+ * @debug
+ * @verbose
+ */
 int
 famfs_mount_fuse(
 	const char *realdaxdev,
@@ -655,14 +725,17 @@ famfs_mount_fuse(
 	int useraccess,
 	int default_perm,
 	int bounce_dax,
+	int dummy,
+	u64 dummy_log_size,
 	int debug,
 	int verbose)
 {
-	u64 log_offset, log_size;
+	u64 log_offset = FAMFS_SUPERBLOCK_SIZE;
 	char superblock_path[PATH_MAX] = {0};
 	struct famfs_superblock *sb = NULL;
 	char shadow_root[PATH_MAX] = {0};
-	size_t sb_size, log_size_out;;
+	u64 log_size = dummy_log_size;
+	size_t sb_size, log_size_out;
 	enum famfs_system_role role;
 	int shadow_created = 0;
 	char *local_shadow;
@@ -787,11 +860,12 @@ famfs_mount_fuse(
 		rc = -1;
 		goto out;
 	}
+
 	snprintf(superblock_path, PATH_MAX - 1, "%s/%s",
 		 realmpt, ".meta/.superblock");
-	sb = (struct famfs_superblock *)famfs_mmap_whole_file(superblock_path,
-							      1 /* read_only */,
-							      &sb_size);
+	sb = (struct famfs_superblock *)famfs_mmap_whole_file(
+		superblock_path, 1 /* read_only */,
+		&sb_size);
 	if (!sb) {
 		fprintf(stderr, "%s: failed to mmap superblock file\n",
 			__func__);
@@ -802,65 +876,145 @@ famfs_mount_fuse(
 	/* Get the role, log offset and size via the superblock
 	 * meta file
 	 */
-	role = __famfs_get_role_and_logstats(sb, &log_offset, &log_size);
-	switch (role) {
-	case FAMFS_NOSUPER:
-		rc = -1;
-		munmap(sb, FAMFS_SUPERBLOCK_SIZE); /* unmap before umount */
-
-		goto out;
-		break;
-	default:
+	role = __famfs_get_role_and_logstats(sb, &log_offset,
+					     (u64 *)&log_size_out);
+	if (!dummy) {
+		switch (role) {
+		case FAMFS_NOSUPER:
+			/* FAMFS_NOSUPER is the only case where we abort a
+			 * non-dummy mount: unmap before umount */
+			rc = munmap(sb, FAMFS_SUPERBLOCK_SIZE);
+			sb = NULL;
+			if (rc)
+				fprintf(stderr, "%s: failed to munmap superblock"
+					" errno=%d\n", __func__, errno);
+			rc = -EPERM;
+			goto out;
+			break;
+		default:
+		}
 	}
 
-	/* Now that we know the offset and size of the log file, create
-	 * its shadow meta file
-	 */
-	rc = __famfs_mkmeta_log(shadow_root, sb->ts_log_offset, sb->ts_log_len,
-				role, 1 /* shadow */, verbose);
-	if (rc) {
-		fprintf(stderr, "%s: failed to create superblock file\n",
-			__func__);
-		goto out;
-	}
+	if (role == FAMFS_MASTER || role == FAMFS_CLIENT)
+		assert(sb->ts_log_offset == FAMFS_SUPERBLOCK_SIZE);
+
+	/* if log_size is set, it's from the dummy_log_size argument - use that.
+	 * If not set, use the actual log size form the superblock */
+	if (log_size == 0)
+		log_size = log_size_out;
+
+	if (log_size > 0) {
+		/* Now that we know the offset and size of the log file, create
+		 * its shadow meta file
+		 */
+		rc = __famfs_mkmeta_log(shadow_root, log_offset, log_size,
+					role, 1 /* shadow */, verbose);
+		if (rc) {
+			fprintf(stderr, "%s: failed to create superblock file\n",
+				__func__);
+			goto out;
+		}
 	
-	/* Wait for the log file to appear before playing the log
-	 */
-	if (check_file_exists(realmpt, ".meta/.log",
-			      1000 /* timeout */,
-			      sb->ts_log_len, &log_size_out, verbose)) {
-		fprintf(stderr, "%s: superblock file failed to appear\n",
-			__func__);
-		rc = -1;
-		goto out;
-	}
+		/* Wait for the log file to appear before playing the log
+		 */
+		if (check_file_exists(realmpt, ".meta/.log",
+				      1000 /* timeout */,
+				      log_size, &log_size_out, verbose)) {
+			fprintf(stderr, "%s: superblock file failed to appear\n",
+				__func__);
+			rc = -1;
+			goto out;
+		}
 
-	assert(log_size == log_size_out);
+		assert(log_size == log_size_out);
+	}
 
 	/* Unmap the superblock, though logplay will re-map it */
-	munmap(sb, FAMFS_SUPERBLOCK_SIZE);
+	if (sb) {
+		int rc2 = munmap(sb, FAMFS_SUPERBLOCK_SIZE);
+		if (rc2)
+			fprintf(stderr, "%s: failed to unmap superblock\n",
+				__func__);
 
-	/* Finally, play the log */
-	rc = famfs_logplay(realmpt, logplay_use_mmap,
-			   0 /* dry_run */,
-			   0 /* client_mode */,
-			   local_shadow,
-			   0 /* shadow_test */,
-			   verbose);
-	if (rc < 0) {
-		fprintf(stderr, "%s: failed to play the log\n", __func__);
-		goto out;
+		sb = NULL;
 	}
 
+	if (!dummy) {
+		/* Finally, play the log */
+		rc = famfs_logplay(realmpt, logplay_use_mmap,
+				   0 /* dry_run */,
+				   0 /* client_mode */,
+				   local_shadow,
+				   0 /* shadow_test */,
+				   verbose);
+		if (rc < 0) {
+			fprintf(stderr, "%s: failed to play the log\n",
+				__func__);
+			goto out;
+		}
+	}
 out:
+	if (sb) {
+		int rc2 = munmap(sb, FAMFS_SUPERBLOCK_SIZE);
+		if (rc2)
+			fprintf(stderr, "%s: failed to munmap superblock\n",
+				__func__);
+	}
 	if (rc && mounted) {
 		fprintf(stderr, "%s: unmounting due to error\n", __func__);
-		umountrc = umount(realmpt);
-		if (umountrc)
-			fprintf(stderr, "%s: umount failed rc=%d errno=%d\n",
-				__func__, umountrc, errno);
+		umountrc = famfs_umount(realmpt);
+		if (umountrc) {
+			fprintf(stderr,
+				"%s: umount failed for %s (errno=%d)\n",
+				__func__, realmpt, errno);
+			/* Expected by smoke tests in this instance */
+			rc = 99;
+		}
 	}
 
 	free(local_shadow);
 	return rc;
+}
+
+int
+famfs_dummy_mount(
+	const char *realdaxdev,
+	size_t log_size,
+	char **mpt_out,
+	int debug,
+	int verbose)
+{
+	char *mpt = gen_dummy_mpt();
+	size_t size;
+	int rc;
+
+	rc = famfs_get_device_size(realdaxdev, &size, 1 /* only char daxdevs */);
+	if (rc) {
+		fprintf(stderr, "%s: bad daxdev %s\n", __func__, realdaxdev);
+		return rc;
+	}
+
+	assert(mpt_out);
+	rc = famfs_mount_fuse(realdaxdev, mpt, NULL, 100, 0,
+			      1 /* useraccess */,
+			      1 /* default_perm */,
+			      0 /* bounce_dax */,
+			      1 /* dummy */,
+			      log_size,
+			      debug, verbose);
+	if (rc) {
+		fprintf(stderr, "%s: dummy mount failed for %s at %s\n",
+			__func__, realdaxdev, mpt);
+		famfs_log(FAMFS_LOG_ERR,
+			  "%s: dummy mount failed for %s at %s\n",
+			__func__, realdaxdev, mpt);
+		free(mpt);
+		return rc;
+	}
+
+	if (verbose)
+		printf("%s on %s\n", __func__, mpt);
+
+	*mpt_out = mpt; /* Caller must free mpt */
+	return 0;
 }

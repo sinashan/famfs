@@ -1,184 +1,154 @@
 #!/usr/bin/env bash
 
-cwd=$(pwd)
+set -euo pipefail
 
-# Defaults
-VG=""
-SCRIPTS=../scripts
-RAW_MOUNT_OPTS="-t famfs -o noatime -o dax=always "
-BIN=../debug
-VALGRIND_ARG="valgrind --leak-check=full --show-leak-kinds=all --track-origins=yes"
-RMMOD=0
-FAMFS_MOD="famfs.ko"
+TEST="test_errors"
 
-# Allow these variables to be set from the environment
-if [ -z "$DEV" ]; then
-    DEV="/dev/dax0.0"
-fi
-if [ -z "$MPT" ]; then
-    MPT=/mnt/famfs
-fi
-if [ -z "$UMOUNT" ]; then
-    UMOUNT="umount"
-fi
-if [ -z "${FAMFS_MODE}" ]; then
-    FAMFS_MODE="v1"
-fi
+source smoke/test_header.sh
+source "$SCRIPTS/test_funcs.sh"
 
-# Override defaults as needed
-while (( $# > 0)); do
-    flag="$1"
-    shift
-    case "$flag" in
-	(-M|--module)
-	    FAMFS_MOD=$1
-	    shift
-	    ;;
-	(-d|--device)
-	    DEV=$1
-	    shift;
-	    ;;
-	(-b|--bin)
-	    BIN=$1
-	    shift
-	    ;;
-	(-s|--scripts)
-	    SCRIPTS=$1
-	    source_root=$1;
-	    shift;
-	    ;;
-	(-m|--mode)
-	    FAMFS_MODE="$1"
-	    shift
-	    ;;
-	(-v|--valgrind)
-	    # no argument to -v; just setup for Valgrind
-	    VG=${VALGRIND_ARG}
-	    ;;
-	(-n|--no-rmmod)
-	    RMMOD=0
-	    ;;
-	*)
-	    echo "Unrecognized command line arg: $flag"
-	    ;;
+start_test $TEST
 
-    esac
-done
-
-if [[ "$FAMFS_MODE" == "v1" || "$FAMFS_MODE" == "fuse" ]]; then
-    echo "FAMFS_MODE: $FAMFS_MODE"
-    if [[ "$FAMFS_MODE" == "fuse" ]]; then
-        MOUNT_OPTS="--fuse" # Can drop this b/c fuse is the default
-    else
-        MOUNT_OPTS="--nofuse" # Can drop this b/c fuse is the default
-    fi
-else
-    echo "FAMFS_MODE: invalid"
-    exit 1;
-fi
-
-MOUNT="sudo $VG $BIN/famfs mount $MOUNT_OPTS"
-MKFS="sudo $VG $BIN/mkfs.famfs"
-CLI="sudo $VG $BIN/famfs"
-TEST="test_errors:"
-
-source $SCRIPTS/test_funcs.sh
-# Above this line should be the same for all smoke tests
-
-if [[ "${FAMFS_MODE}" == "fuse" ]]; then
+# test_errors only works with famfsv1 (not fuse)
+if [[ "$FAMFS_MODE" == "fuse" ]]; then
     echo "*************************************************************"
-    echo "test_errs does not support famfs/fuse yet"
+    echo "test_errors does not support famfs/fuse yet"
     echo "*************************************************************"
     sleep 1
     exit 0
 fi
 
-set -x
-
-# Start with a clean, empty file system
+#
+# Fresh filesystem
+#
 famfs_recreate "test_errors"
+verify_mounted "$DEV" "$MPT" "test_errors.sh"
 
-verify_mounted $DEV $MPT "test_errors.sh"
+expect_good   "${FSCK[@]}" "$MPT" \
+             -- "fsck should not fail when nothing cloned"
 
-${CLI} fsck $MPT || fail "fsck should not fail when nothing cloned"
-
+#
 # Create a file to clone
-${CLI} creat -r -S 10 -s 0x400000 $MPT/original || fail "create original should succeed"
-${CLI} verify -S 10 -f $MPT/original            || fail "verify original should succeed"
+#
+expect_good   "${CLI[@]}" creat -r -S 10 -s 0x400000 "$MPT/original" \
+             -- "create original"
+expect_good   "${CLI[@]}" verify -S 10 -f "$MPT/original" \
+             -- "verify original"
 
-N="10"
-FILE="bigtest$N"
-${CLI} clone -h                               || fail "clone -h should succeed"
-${CLI} clone $MPT/original $MPT/clone         || fail "clone original should succeed"
-${CLI} clone -v $MPT/original $MPT/clone1     || fail "second clone should succeed"
-${CLI} clone -v $MPT/clone $MPT/clone2        || fail "clone from clone should also succeed"
+#
+# Basic clone tests
+#
+expect_good   "${CLI[@]}" clone -h \
+             -- "clone -h should succeed"
 
-${CLI} verify -S 10 -f $MPT/clone             || fail "verify clone should succeed"
-${CLI} verify -S 10 -f $MPT/clone1            || fail "verify clone1 should succeed"
-${CLI} verify -S 10 -f $MPT/clone2            || fail "verify clone2 should succeed"
+expect_good   "${CLI[@]}" clone "$MPT/original" "$MPT/clone" \
+             -- "clone original"
 
+expect_good   "${CLI[@]}" clone -v "$MPT/original" "$MPT/clone1" \
+             -- "clone1"
 
+expect_good   "${CLI[@]}" clone -v "$MPT/clone" "$MPT/clone2" \
+             -- "clone2"
+
+expect_good   "${CLI[@]}" verify -S 10 -f "$MPT/clone"  -- "verify clone"
+expect_good   "${CLI[@]}" verify -S 10 -f "$MPT/clone1" -- "verify clone1"
+expect_good   "${CLI[@]}" verify -S 10 -f "$MPT/clone2" -- "verify clone2"
+
+#
 # Error cases
-${CLI} clone  && fail "clone with no args should fail"
-${CLI} clone -v $MPT/bogusfile $MPT/bogusfile.cllone && fail "clone bogusfile should fail"
-${CLI} clone -v /etc/passwd $MPT/passwd              && fail "clone from outside famfs should fail"
+#
+expect_fail   "${CLI[@]}" clone \
+             -- "clone with no args should fail"
 
+expect_fail   "${CLI[@]}" clone -v "$MPT/bogusfile" "$MPT/bogusfile.cllone" \
+             -- "clone on nonexistent file should fail"
 
-${CLI} fsck $MPT && fail "fsck should fail after cloning "
-${CLI} verify -S 10 -f $MPT/clone  || fail "re-verify clone"
-${CLI} verify -S 10 -f $MPT/clone1 || fail "re-verify clone1"
+expect_fail   "${CLI[@]}" clone -v /etc/passwd "$MPT/passwd" \
+             -- "clone from non-famfs file should fail"
 
-sudo $UMOUNT $MPT || fail "umount"
-verify_not_mounted $DEV $MPT "test_errors .sh"
-${MOUNT} $DEV $MPT || fail "mount in test_errors"
-#full_mount $DEV $MPT "${MOUNT_OPTS}" "test_errors.sh"
-verify_mounted $DEV $MPT "test1.sh"
+#
+# fsck should now fail after cloning
+#
+expect_fail   "${FSCK[@]}" "$MPT" \
+             -- "fsck should fail after cloning"
 
-# Throw a curveball or two at logplay
-${CLI} mkdir $MPT/adir         || fail "should be able to mkdir adir"
-${CLI} mkdir $MPT/adir2        || fail "should be able to mkdir adir2"
-sudo rm -rf $MPT/adir
-if (( $? == 0 )); then
-    sudo touch $MPT/adir           || fail "should be able to create rogue file"
-    sudo rm -rf $MPT/adir2         \
-	|| fail "should be able to rogue remove a dir2"
-    sudo touch $MPT/adir2          || fail "should be able to touch a file"
-    ${CLI} logplay -vvv $MPT       \
-	&& fail "logplay should complain when a file is where a dir should be"
+expect_good   "${CLI[@]}" verify -S 10 -f "$MPT/clone"  -- "reverify clone"
+expect_good   "${CLI[@]}" verify -S 10 -f "$MPT/clone1" -- "reverify clone1"
+
+#
+# Unmount/remount
+#
+expect_good   sudo "$UMOUNT" "$MPT" -- "umount"
+verify_not_mounted "$DEV" "$MPT" "test_errors.sh"
+
+expect_good   "${MOUNT[@]}" "$DEV" "$MPT" \
+             -- "mount after unmount"
+verify_mounted "$DEV" "$MPT" "test_errors remount"
+
+#
+# Throw curveballs at logplay
+#
+expect_good   "${CLI[@]}" mkdir "$MPT/adir"  -- "mkdir adir"
+expect_good   "${CLI[@]}" mkdir "$MPT/adir2" -- "mkdir adir2"
+
+set +e
+sudo rm -rf "$MPT/adir"
+rc=$?
+set -e
+if (( rc == 0 )); then
+    expect_good sudo touch "$MPT/adir"     -- "rogue file in place of dir"
+    expect_good sudo rm -rf "$MPT/adir2"   -- "remove adir2"
+    expect_good sudo touch "$MPT/adir2"    -- "touch file"
+    expect_fail "${CLI[@]}" logplay -vvv "$MPT" \
+                -- "logplay should complain when file replaces directory"
 fi
-sudo ln -s /tmp $MPT/adir2     && fail "symlink should fail with famfs kmod v2"
 
-${CLI} fsck -v $MPT && fail "fsck -v if a clone has ever happened should fail"
-${CLI} fsck $MPT && fail "fsck if a clone has ever happened should fail"
+expect_fail sudo ln -s /tmp "$MPT/adir2" \
+            -- "symlink should fail with famfs v1/v2"
 
-# Some v2-specific tests
+expect_fail "${FSCK[@]}" -v "$MPT" \
+            -- "fsck -v should fail once cloning has occurred"
+expect_fail "${FSCK[@]}" "$MPT" \
+            -- "fsck should fail after cloning"
 
-sudo $UMOUNT $MPT            || fail "umount should work"
-${MOUNT} $DEV $MPT       || fail "basic mount should succeed"
-${MOUNT} $DEV $MPT       && fail "remount 1 should fail"
-${MOUNT} $DEV $MPT       && fail "remount 2 should fail"
-${MOUNT} $DEV $MPT       && fail "remount 3 should fail"
+#
+# v2-specific redundant mount behavior (also applies to v1 logically)
+#
+expect_good sudo "$UMOUNT" "$MPT" -- "umount before remount tests"
+expect_good "${MOUNT[@]}" "$DEV" "$MPT" -- "normal mount"
+
+expect_fail "${MOUNT[@]}" "$DEV" "$MPT" -- "redundant remount 1"
+expect_fail "${MOUNT[@]}" "$DEV" "$MPT" -- "redundant remount 2"
+expect_fail "${MOUNT[@]}" "$DEV" "$MPT" -- "redundant remount 3"
+
 sudo mkdir -p /tmp/famfs
-${MOUNT} $DEV /tmp/famfs && fail "remount at different path should fail"
-verify_mounted $DEV $MPT     "mounted after redundant mounts"
-sudo $UMOUNT $MPT            || fail "umount should work after redundant mounts"
-verify_not_mounted $DEV $MPT "umount should have worked after redundant mounts"
+expect_fail "${MOUNT[@]}" "$DEV" /tmp/famfs \
+            -- "mount same dev at different path should fail"
 
-${MOUNT} $DEV $MPT       || fail "basic mount should succeed"
+verify_mounted "$DEV" "$MPT" "after redundant mount attempts"
 
-mkdir -p ~/smoke.shadow
-${CLI} logplay --shadow ~/smoke.shadow/test_errors.shadow $MPT
+expect_good sudo "$UMOUNT" "$MPT" \
+            -- "umount after redundant mounts"
+verify_not_mounted "$DEV" "$MPT" "should be unmounted"
 
-#sudo $UMOUNT $MPT || fail "umount"
+expect_good "${MOUNT[@]}" "$DEV" "$MPT" \
+            -- "mount after redundant tests"
+
+#
+# shadow logplay
+#
+SHADOW="/tmp/smoke.shadow/test_errors.shadow/root"
+
+expect_good sudo mkdir -p "$SHADOW" \
+            -- "mkdir shadow path"
+
+expect_good "${CLI[@]}" logplay -sS "$SHADOW" "$MPT" \
+            -- "shadow logplay -Ss should work"
 
 set +x
 echo "*************************************************************************"
-echo " Important note: This test (at least the first run) will generate a stack dump"
-echo " in the kernel log (a WARN_ONCE) due to cross-linked pages (specifically DAX noticing"
-echo " that a page was mapped to more than one file. This is normal, as this test intentionally"
-echo " does bogus cross-linked mappings"
-set +x
-echo ":==*************************************************************************"
-echo ":==test_errors completed successfully"
-echo ":==*************************************************************************"
+echo " NOTE: This test *intentionally* triggers kernel WARN_ONCE stack dumps"
+echo "       due to forced cross-linked DAX mappings. This is normal."
+echo "*************************************************************************"
+finish_test $TEST
 exit 0

@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: Apache-2.0 */
 /*
- * Copyright (C) 2023-2024 Micron Technology, Inc.  All rights reserved.
+ * Copyright (C) 2023-2025 Micron Technology, Inc.  All rights reserved.
  */
 
 #ifndef _H_FAMFS_LIB
@@ -12,6 +12,7 @@
 #include <linux/famfs_ioctl.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <stdbool.h>
 
 #include "famfs.h"
 #include "famfs_meta.h"
@@ -49,7 +50,11 @@ char *famfs_get_shadow_root(const char *shadow_path, int verbose);
 int famfs_mount_fuse(const char *realdaxdev, const char *realmpt,
 		     const char *realshadow, ssize_t timeout,
 		     int logplay_use_fuse, int useraccess, int default_perm,
-		     int bounce_dax, int debug, int verbose);
+		     int bounce_dax, int dummy, u64 dummy_log_size,
+		     int debug, int verbose);
+int famfs_dummy_mount(const char *realdaxdev, size_t log_len, char **mpt_out,
+		      int debug, int verbose);
+int famfs_umount(const char *mpt);
 
 /* famfs_lib dual v1/v2 functions */
 int file_is_famfs_v1(const char *fname);
@@ -57,10 +62,10 @@ int file_is_famfs(const char *fname);
 
 /* famfs_lib v1 functions */
 int famfs_module_loaded(int verbose);
-int famfs_get_role_by_dev(const char *daxdev);
+enum famfs_system_role famfs_get_role_by_dev(const char *daxdev);
 void *famfs_mmap_whole_file(const char *fname, int read_only, size_t *sizep);
 
-extern int famfs_get_device_size(const char *fname, size_t *size);
+extern int famfs_get_device_size(const char *fname, size_t *size, bool char_only);
 int famfs_check_super(const struct famfs_superblock *sb,
 		      u64 *log_offset, u64 *log_size);
 enum famfs_system_role __famfs_get_role_and_logstats(
@@ -69,8 +74,9 @@ enum famfs_system_role __famfs_get_role_and_logstats(
 enum famfs_system_role
 famfs_get_role_and_logstats(const struct famfs_superblock *sb,
 			    u64 *log_offsetp, u64 *log_sizep);
-int famfs_fsck(const char *devname, int use_mmap, int human, int force, 
-		int nbuckets, int verbose);
+int famfs_fsck(const char *devname, bool nodax,
+	       int use_mmap, int human,
+	       int nbuckets, int verbose);
 
 int famfs_mkmeta_standalone(const char *devname, int verbose);
 int __famfs_mkmeta_superblock(const char *mpt, int shadow, int verbose);
@@ -95,7 +101,7 @@ int famfs_clone(const char *srcfile, const char *destfile);
 
 int famfs_mkdir(const char *dirpath, mode_t mode, uid_t uid, gid_t gid, int verbose);
 int famfs_mkdir_parents(const char *dirpath, mode_t mode, uid_t uid, gid_t gid, int verbose);
-int famfs_mkfs(const char *daxdev, u64 log_len, int kill, int force);
+int famfs_mkfs(const char *daxdev, u64 log_len, int kill, bool nodax, int force);
 int famfs_check(const char *path, int verbose);
 
 int famfs_flush_file(const char *filename, int verbose);
@@ -112,12 +118,14 @@ void famfs_dump_super(struct famfs_superblock *sb);
 int famfs_get_system_uuid(uuid_le *uuid_out);
 void famfs_print_uuid(const uuid_le *uuid);
 enum famfs_type famfs_get_kernel_type(int verbose);
+bool famfs_daxmode_required(void);
 void free_string_list(char **strings, int nstrings);
 char **tokenize_string(const char *input, const char *delimiter, int *out_count);
 void famfs_thpool_destroy(threadpool thp, useconds_t usec);
 void log_file_mode(
 	const char *caller, const char *name, const struct stat *st,
 	int log_level);
+int exit_val(int rc);
 
 /* famfs_yaml.c */
 #include <yaml.h>
@@ -129,6 +137,14 @@ int famfs_parse_alloc_yaml(FILE *fp, struct famfs_interleave_param *interleave_p
 const char *yaml_event_str(int event_type);
 
 /* famfs_dax.c */
+enum famfs_daxdev_mode {
+	DAXDEV_MODE_UNKNOWN = 0,
+	DAXDEV_MODE_DEVICE_DAX,
+	DAXDEV_MODE_FAMFS,
+};
+
+enum famfs_daxdev_mode famfs_get_daxdev_mode(const char *daxdev);
+int famfs_set_daxdev_mode(const char *daxdev, enum famfs_daxdev_mode mode);
 int famfs_bounce_daxdev(const char *devname, int verbose);
 
 #endif /* _H_FAMFS_LIB */

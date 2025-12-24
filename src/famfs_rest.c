@@ -29,6 +29,13 @@ static char *sock_path = NULL;
 
 /*
  * Handle a parsed HTTP request and replies
+ *
+ * Supported URLs:
+ *
+ * * log_level/ - (GET, POST or PUT) - get or set log_level
+ * * icache_dump - (GET) dump icache into syslog
+ * * icache_stats - (GET) return icache stats in yaml format
+ * * pid - (GET) Return pid of famfs_fused in yaml format
  */
 static void famfs_dispatch_http(
 	struct mg_connection *c, struct mg_http_message *hm)
@@ -50,7 +57,7 @@ static void famfs_dispatch_http(
 
 		} else if (mg_match(hm->method, mg_str("POST"), NULL) ||
 			   mg_match(hm->method, mg_str("PUT"), NULL)) {
-			// Body may contain "level=3" or just "3"
+			/* Body may contain "level=3" or just "3" */
 			char buf[32] = {0};
 			int len = (int) MIN(hm->body.len, sizeof(buf) - 1);
 			int new_level;
@@ -109,11 +116,18 @@ static void famfs_dispatch_http(
 			      icache->search_count, icache->nodes_scanned,
 			      icache->search_fail_ct);
 
+	} else if (mg_match(hm->uri, mg_str("/pid"), NULL)) {
+		pid_t pid = getpid();
+		mg_http_reply(c, 200,
+			"Content-Type: text/yaml\r\nConnection: close\r\n",
+			"pid: %d\n",
+			pid);
+
 	} else if (mg_match(hm->uri, mg_str("/inodes"), NULL)) {
 		/* Dummy target */
 		mg_http_reply(c, 200,
-			      "Content-Type: text/yaml\r\nConnection: close\r\n",
-			      "inodes:\n  total: 1500\n  open: 12\n  deleted: 7\n");
+			"Content-Type: text/yaml\r\nConnection: close\r\n",
+			"inodes:\n  total: 1500\n  open: 12\n  deleted: 7\n");
 
 	} else {
 		char *meta = "Content-Type: text/plain\r\nConnection: close\r\n";
@@ -137,11 +151,11 @@ static void famfs_unix_bridge(struct mg_connection *c, int ev, void *ev_data)
 			struct mg_http_message hm;
 			int n = mg_http_parse((char *) c->recv.buf, c->recv.len, &hm);
 			if (n > 0) {
-				// got a complete request
+				/* got a complete request */
 				famfs_dispatch_http(c, &hm);
 				mg_iobuf_del(&c->recv, 0, (size_t) n);
 			} else if (n < 0) {
-				// bad request
+				/* bad request */
 				mg_http_reply(c, 400,
 					      "Connection: close\r\n",
 					      "Bad Request\n");

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 /*
- * Copyright (C) 2023-2024 Micron Technology, Inc.  All rights reserved.
+ * Copyright (C) 2023-2025 Micron Technology, Inc.  All rights reserved.
  */
 
 #include <stdio.h>
@@ -154,9 +154,10 @@ do_famfs_cli_logplay(int argc, char *argv[])
 		case 'S':
 			if (shadowpath) {
 				fprintf(stderr,
-					"%s: don't specify more than one shadowpath\n",
+					"%s: don't specify more than one "
+					"shadowpath\n",
 					__func__);
-				return -EINVAL;
+				return EINVAL;
 			}
 			shadowpath = optarg;
 			break;
@@ -174,9 +175,10 @@ do_famfs_cli_logplay(int argc, char *argv[])
 
 	if (use_mmap && use_read) {
 		fprintf(stderr,
-			"Error: The --mmap and --read arguments are mutually exclusive\n\n");
+			"Error: The --mmap and --read arguments "
+			"are mutually exclusive\n\n");
 		famfs_logplay_usage(argc, argv);
-		return -1;
+		return 1;
 	}
 	if (!(use_mmap || use_read)) {
 		/* If neither method was explicitly requested, default to mmap */
@@ -186,7 +188,7 @@ do_famfs_cli_logplay(int argc, char *argv[])
 	if (daxdev && !shadowpath) {
 		fprintf(stderr,
 			"Error: daxdev only used with shadow logplay\n");
-		return -1;
+		return 1;
 	}
 	if (shadowpath)
 		printf("Logplay: running in shadow test mode\n");
@@ -197,7 +199,7 @@ do_famfs_cli_logplay(int argc, char *argv[])
 			"(actually any path within a famfs file system "
 			"will work)\n");
 		famfs_logplay_usage(argc, argv);
-		return -1;
+		return 1;
 	}
 	fspath = argv[optind++];
 
@@ -257,6 +259,7 @@ do_famfs_cli_mount(int argc, char *argv[])
 {
 	int c;
 	int rc;
+	int dummy = 0;
 	int debug = 0;
 	int verbose = 0;
 	int use_read = 0;
@@ -289,6 +292,7 @@ do_famfs_cli_mount(int argc, char *argv[])
 		{"nodefaultperm", no_argument,         0,  'p'},
 		{"bouncedax",   no_argument,           0,  'b'},
 		{"shadow",     required_argument,      0,  'S'},
+		{"dummy",      no_argument,            0,  'D'},
 
 		/* un-advertised options */
 		{"remount",    no_argument,            0,  'R'},
@@ -303,7 +307,7 @@ do_famfs_cli_mount(int argc, char *argv[])
 	 * to return -1 when it sees something that is not recognized option
 	 * (e.g. the command that will mux us off to the command handlers
 	 */
-	while ((c = getopt_long(argc, argv, "+h?RrfFmvupbdt:c:S:",
+	while ((c = getopt_long(argc, argv, "+h?RrfFmvupbdt:c:S:D",
 				mount_options, &optind)) != EOF) {
 
 		switch (c) {
@@ -323,8 +327,8 @@ do_famfs_cli_mount(int argc, char *argv[])
 			break;
 		case 'r':
 			fprintf(stderr,
-				"%s: warning: the read option can cause cache coherency problems\n",
-				__func__);
+				"%s: warning: the read option can cause "
+				"cache coherency problems\n", __func__);
 			use_read = 1;
 			break;
 		case 'R':
@@ -345,8 +349,8 @@ do_famfs_cli_mount(int argc, char *argv[])
 		case 'S':
 			if (shadowpath) {
 				fprintf(stderr,
-					"%s: don't specify more than one shadowpath\n",
-					__func__);
+					"%s: don't specify more than one "
+					"shadowpath\n", __func__);
 				return -EINVAL;
 			}
 			shadowpath = optarg;
@@ -355,16 +359,20 @@ do_famfs_cli_mount(int argc, char *argv[])
 			timeout = strtoul(optarg, 0, 0);
 			break;
 		case 'c':
-			/* This was inherited from passthrough_ll.c (libfuse) and will
-			 * likely be removed soon */
+			/* This was inherited from passthrough_ll.c (libfuse)
+			 * and will likely be removed soon */
 			cachearg = optarg;
+			break;
+		case 'D':
+			printf("dummy = 1\n");
+			dummy = 1;
 			break;
 		}
 	}
 
 	if (use_mmap && use_read) {
 		fprintf(stderr,
-			"Error: The --mmap and --read arguments are mutually exclusive\n\n");
+			"Error: --mmap and --read are mutually exclusive\n\n");
 		famfs_mount_usage(argc, argv);
 		return -1;
 	} else if (!(use_mmap || use_read)) {
@@ -394,8 +402,17 @@ do_famfs_cli_mount(int argc, char *argv[])
 
 	remaining_args = argc - optind;
 
-	if (remaining_args != 2) {
-		fprintf(stderr, "famfs mount error: <daxdev> and <mountpoint> args are required\n");
+	if (dummy && remaining_args != 1) {
+		fprintf(stderr,
+			"%s: error: dummy mount requires <daxdev>\n",
+			__func__);
+		famfs_mount_usage(argc, argv);
+		return -1;
+	}
+	else if (!dummy && remaining_args != 2) {
+		fprintf(stderr,
+			"%s: error: <daxdev> and <mountpoint> args required\n",
+			__func__);
 		famfs_mount_usage(argc, argv);
 		return -1;
 	}
@@ -407,13 +424,16 @@ do_famfs_cli_mount(int argc, char *argv[])
 		free(realdaxdev);
 		return -1;
 	}
-	mpt = argv[optind++];
-	realmpt = realpath(mpt, NULL);
-	if (!realmpt) {
-		fprintf(stderr, "famfs mount: mount pt (%s) not found\n", mpt);
-		free(realmpt);
-		rc = -1;
-		goto err_out;
+	if (!dummy) {
+		mpt = argv[optind++];
+		realmpt = realpath(mpt, NULL);
+		if (!realmpt) {
+			fprintf(stderr,
+				"famfs mount: mount pt (%s) not found\n", mpt);
+			free(realmpt);
+			rc = -1;
+			goto err_out;
+		}
 	}
 
 	if (fuse_mode == 0)
@@ -428,17 +448,39 @@ do_famfs_cli_mount(int argc, char *argv[])
 		verbose_to_log_level(verbose);
 
 	if (fuse_mode == FAMFS_FUSE) {
+		if (dummy) {
+			char *mpt_out;
+			rc = famfs_dummy_mount(realdaxdev,
+					       0 /* figure out log size */,
+					       &mpt_out,
+					       debug, verbose);
+			if (rc == 0)
+				printf("Successful dummy mount at %s\n",
+				       mpt_out);
+
+			free(mpt_out);
+			goto out;
+		}
+
 		printf("daxdev=%s, mpt=%s\n", realdaxdev, realmpt);
-		rc = famfs_mount_fuse(realdaxdev, realmpt, shadowpath, timeout,
-				      use_mmap, useraccess, default_perm, bouncedax,
+		rc = famfs_mount_fuse(realdaxdev, realmpt, shadowpath,
+				      timeout, use_mmap, useraccess,
+				      default_perm, bouncedax,
+				      0, 0, /* not dummy mount */
 				      debug, verbose);
 		goto out;
+
 	}
 
 	/*
 	 * From here down, it's a standalone famfs mount
 	 */
 
+	if (dummy) {
+		fprintf(stderr, "famfs mount: dummy mode is fuse-only\n");
+		rc = -1;
+		goto err_out;
+	}
 	if (!famfs_module_loaded(1)) {
 		fprintf(stderr,
 			"famfs mount: famfs kernel module is not loaded!\n");
@@ -481,7 +523,7 @@ do_famfs_cli_mount(int argc, char *argv[])
 	if (rc) {
 		fprintf(stderr,
 			"famfs mount: err %d from mkmeta; unmounting\n", rc);
-		umount(realmpt);
+		famfs_umount(realmpt);
 		goto err_out;
 	}
 	/*
@@ -496,9 +538,11 @@ do_famfs_cli_mount(int argc, char *argv[])
 			   verbose);
 	if (rc == 0)
 		famfs_log(FAMFS_LOG_NOTICE,
-			  "famfs cli: famfs mount completed successfully on %s", realmpt);
+			  "famfs cli: famfs mount completed successfully on %s",
+			  realmpt);
 	else
-		famfs_log(FAMFS_LOG_ERR, "famfs cli: famfs mount failed on %s", realmpt);
+		famfs_log(FAMFS_LOG_ERR, "famfs cli: famfs mount failed on %s",
+			  realmpt);
 
 out:
 err_out:
@@ -577,8 +621,9 @@ do_famfs_cli_mkmeta(int argc, char *argv[])
 	daxdev = argv[optind++];
 	realdaxdev = realpath(daxdev, NULL);
 	if (!realdaxdev) {
-		fprintf(stderr, "%s: unable to rationalize daxdev path from (%s) rc %d\n",
-			__func__, daxdev, errno);
+		fprintf(stderr,
+			"%s: unable to rationalize daxdev path from "
+			"(%s) rc %d\n", __func__, daxdev, errno);
 		free(realdaxdev);
 		return -1;
 	}
@@ -624,21 +669,25 @@ do_famfs_cli_fsck(int argc, char *argv[])
 	int c;
 	extern int mock_fstype;
 	char *daxdev = NULL;
+	bool nodax = false;
 	int nbuckets = 0;
 	int use_mmap = 0;
 	int use_read = 0;
 	int verbose = 0;
-	int force = 0;
 	int human = 0; /* -h is no longer --help... */
 
 	struct option fsck_options[] = {
-		/* These options set a */
-		{"mmap",        no_argument,             0,  'm'},
 		{"human",       no_argument,             0,  'h'},
 		{"verbose",     no_argument,             0,  'v'},
 		{"force",       no_argument,             0,  'f'},
-		{"mock",        no_argument,             0,  'M'},
 		{"nbuckets",    required_argument,       0,  'B'},
+
+		/* Un-publicized options */
+		{"mmap",        no_argument,             0,  'm'},
+		{"read",        no_argument,             0,  'r'},
+		{"mock",        no_argument,             0,  'M'},
+		{"nodax",       no_argument,             0,  'D'},
+
 		{0, 0, 0, 0}
 	};
 
@@ -646,7 +695,7 @@ do_famfs_cli_fsck(int argc, char *argv[])
 	 * to return -1 when it sees something that is not recognized option
 	 * (e.g. the command that will mux us off to the command handlers
 	 */
-	while ((c = getopt_long(argc, argv, "+vh?mrfMB:",
+	while ((c = getopt_long(argc, argv, "+vh?mrfMB:D",
 				fsck_options, &optind)) != EOF) {
 
 		switch (c) {
@@ -666,16 +715,14 @@ do_famfs_cli_fsck(int argc, char *argv[])
 		case 'v':
 			verbose++;
 			break;
-		case 'f':
-			/* This "hidden" option tries to mmap devdax
-			 * even when a fs is mounted */
-			force++;
-			break;
 		case 'M':
 			mock_fstype = FAMFS_V1;
 			break;
 		case 'B':
 			nbuckets = strtoul(optarg, 0, 0);
+			break;
+		case 'D':
+			nodax = true;
 			break;
 		case '?':
 			famfs_fsck_usage(argc, argv);
@@ -701,7 +748,8 @@ do_famfs_cli_fsck(int argc, char *argv[])
 	}
 
 	daxdev = argv[optind++];
-	return famfs_fsck(daxdev, use_mmap, human, force, nbuckets, verbose);
+	return famfs_fsck(daxdev, nodax, use_mmap, human,
+			  nbuckets, verbose);
 }
 
 
@@ -828,7 +876,8 @@ do_famfs_cli_cp(int argc, char *argv[])
 
 		case 'C':
 			set_stripe++;
-			interleave_param.chunk_size = strtoull(optarg, &endptr, 0);
+			interleave_param.chunk_size = strtoull(optarg,
+							       &endptr, 0);
 			mult = get_multiplier(endptr);
 			if (mult > 0)
 				interleave_param.chunk_size *= mult;
@@ -1057,7 +1106,9 @@ do_famfs_cli_getmap(int argc, char *argv[])
 		rc = stat(filename, &st);
 		if (rc < 0) {
 			if (!quiet)
-				fprintf(stderr, "famfs_getmap: file not found (%s)\n", filename);
+				fprintf(stderr,
+					"famfs_getmap: file not found (%s)\n",
+					filename);
 			rc = EBADF;
 			if (!continue_on_err)
 				goto err_out;
@@ -1084,7 +1135,7 @@ do_famfs_cli_getmap(int argc, char *argv[])
 		if (rc) {
 			if (!quiet)
 				fprintf(stderr,
-					"famfs_getmap: file (%s) not in a famfs file system\n",
+					"famfs_getmap: file (%s) not in famfs\n",
 					filename);
 			rc = 1;
 			if (continue_on_err)
@@ -1129,7 +1180,9 @@ do_famfs_cli_getmap(int argc, char *argv[])
 				break;
 
 			case FAMFS_IOC_EXT_INTERLEAVE: {
-				struct famfs_ioc_simple_extent *strips = ifmap.ks.kie_strips;
+				struct famfs_ioc_simple_extent *strips;
+
+				strips = ifmap.ks.kie_strips;
 				printf("Interleave_Param chunk_size: %lld\n",
 				       ifmap.ks.ikie.ie_chunk_size);
 				printf("Interleaved extent has %lld strips:\n",
@@ -1164,7 +1217,8 @@ do_famfs_cli_getmap(int argc, char *argv[])
 			if (quiet)
 				goto next_file;
 
-			/* Only bother to retrieve extents if we'll be printing them */
+			/* Only bother to retrieve extents if we'll be
+			 * printing them */
 			ext_list = calloc(filemap.ext_list_count,
 					  sizeof(struct famfs_extent));
 			rc = ioctl(fd, FAMFSIOC_MAP_GETEXT, ext_list);
@@ -1264,7 +1318,9 @@ do_famfs_cli_clone(int argc, char *argv[])
 
 	/* There should be 2 more arguments */
 	if (optind > (argc - 2)) {
-		fprintf(stderr, "%s: source and destination filenames required\n", __func__);
+		fprintf(stderr,
+			"%s: source and destination filenames required\n",
+			__func__);
 		famfs_clone_usage(argc, argv);
 		return -1;
 	}
@@ -1527,7 +1583,9 @@ threaded_randomize(void *arg)
 	struct multi_creat *mc = arg;
 
 	assert(mc);
-	mc->rc = randomize_one(mc->fname, mc->fsize, mc->seed);
+	/* Only randomize if creation succeeded; preserve creation errors */
+	if (mc->rc == 0)
+		mc->rc = randomize_one(mc->fname, mc->fsize, mc->seed);
 }
 
 
@@ -1553,6 +1611,10 @@ randomize_multi(
 	if (threadct)
 		thp = thpool_init(threadct);
 	for (i = 0; i < multi_count; i++) {
+		/* Skip files that weren't created or don't have seeds */
+		if (!mc[i].seed)
+			continue;
+
 		if (threadct)
 			thpool_add_work(thp, threaded_randomize,
 					(void *)&mc[i]);
@@ -1662,7 +1724,8 @@ do_famfs_cli_creat(int argc, char *argv[])
 			/* Interleaving Options */
 		case 'C':
 			set_stripe++;
-			interleave_param.chunk_size = strtoull(optarg, &endptr, 0);
+			interleave_param.chunk_size = strtoull(optarg,
+							       &endptr, 0);
 			mult = get_multiplier(endptr);
 			if (mult > 0)
 				interleave_param.chunk_size *= mult;
@@ -1930,7 +1993,8 @@ verify_one(const char *filename, s64 seed, int quiet)
 		return 1;
 	}
 	if (!seed) {
-		fprintf(stderr, "Must specify random seed to verify file data\n");
+		fprintf(stderr,
+			"Must specify random seed to verify file data\n");
 		return 1;
 	}
 	fd = open(filename, O_RDWR, 0);
@@ -2185,14 +2249,17 @@ do_famfs_cli_flush(int argc, char *argv[])
 	}
 
 	if (optind > (argc - 1)) {
-		fprintf(stderr, "%s: source and destination filenames required\n", __func__);
+		fprintf(stderr,
+			"%s: source and destination filenames required\n",
+			__func__);
 		famfs_clone_usage(argc, argv);
 		return -1;
 	}
 	while (optind < argc) {
 		file = argv[optind++];
 		if (realpath(file, fullpath) == NULL) {
-			fprintf(stderr, "%s: bad source path %s\n", __func__, file);
+			fprintf(stderr, "%s: bad source path %s\n",
+				__func__, file);
 			errs++;
 			continue;
 		}
@@ -2255,8 +2322,8 @@ famfs_chkread_usage(int argc,
  * famfs_chkread()
  *
  * This function was added while debugging some dragons in /dev/dax resolution of
- * faults vs. read/write, and it's a useful test. It just verifies that the contents
- * of a file are the same whether accessed by read or mmap
+ * faults vs. read/write, and it's a useful test. It just verifies that the
+ * contents of a file are the same whether accessed by read or mmap
  */
 int
 do_famfs_cli_chkread(int argc, char *argv[])
@@ -2305,13 +2372,14 @@ do_famfs_cli_chkread(int argc, char *argv[])
 
 	if (filename == NULL) {
 		fprintf(stderr, "Must supply filename\n");
-		exit(-1);
+		return 1;
 	}
 
 	rc = stat(filename, &st);
 	if (rc < 0) {
-		fprintf(stderr, "%s: could not stat file %s\n", __func__, filename);
-		exit(-1);
+		fprintf(stderr, "%s: could not stat file %s\n",
+			__func__, filename);
+		return 1;
 	}
 	buf = calloc(1, st.st_size);
 	assert(buf);
@@ -2425,6 +2493,7 @@ do_famfs_cli_help(int argc, char **argv)
 		printf("\t%s\n", famfs_cli_cmds[i].cmd);
 }
 
+
 int
 main(int argc, char **argv)
 {
@@ -2450,7 +2519,7 @@ main(int argc, char **argv)
 	if (optind >= argc) {
 		fprintf(stderr, "famfs_cli: missing command\n\n");
 		do_famfs_cli_help(argc, argv);
-		return -1;
+		return 1;
 	}
 
 	famfs_log_enable_syslog("famfs", LOG_PID | LOG_CONS, LOG_DAEMON);
@@ -2460,7 +2529,7 @@ main(int argc, char **argv)
 			optind++; /* move past cmd on cmdline */
 			rc = famfs_cli_cmds[i].run(argc, argv);
 			famfs_log_close_syslog();
-			return rc;
+			return exit_val(rc);
 		}
 	}
 
@@ -2468,6 +2537,6 @@ main(int argc, char **argv)
 	fprintf(stderr, "famfs cli: Unrecognized command %s\n", argv[optind]);
 	do_famfs_cli_help(argc, argv);
 
-	return -1;
+	return 3;
 }
 

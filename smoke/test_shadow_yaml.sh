@@ -1,237 +1,169 @@
 #!/usr/bin/env bash
 
-cwd=$(pwd)
-
-# Defaults
-VG=""
-SCRIPTS=../scripts
-RAW_MOUNT_OPTS="-t famfs -o noatime -o dax=always "
-BIN=../debug
-VALGRIND_ARG="valgrind --leak-check=full --show-leak-kinds=all --track-origins=yes"
-RMMOD=0
-FAMFS_MOD="famfs.ko"
-
-# Allow these variables to be set from the environment
-if [ -z "$DEV" ]; then
-    DEV="/dev/dax0.0"
-fi
-if [ -z "$MPT" ]; then
-    MPT=/mnt/famfs
-fi
-if [ -z "$UMOUNT" ]; then
-    UMOUNT="umount"
-fi
-if [ -z "${FAMFS_MODE}" ]; then
-    FAMFS_MODE="v1"
-fi
-
-# Override defaults as needed
-while (( $# > 0)); do
-    flag="$1"
-    shift
-    case "$flag" in
-	(-M|--module)
-	    FAMFS_MOD=$1
-	    shift
-	    ;;
-	(-d|--device)
-	    DEV=$1
-	    shift;
-	    ;;
-	(-b|--bin)
-	    BIN=$1
-	    shift
-	    ;;
-	(-s|--scripts)
-	    SCRIPTS=$1
-	    source_root=$1;
-	    shift;
-	    ;;
-	(-m|--mode)
-	    FAMFS_MODE="$1"
-	    shift
-	    ;;
-	(-v|--valgrind)
-	    # no argument to -v; just setup for Valgrind
-	    VG=${VALGRIND_ARG}
-	    ;;
-	(-n|--no-rmmod)
-	    RMMOD=0
-	    ;;
-	*)
-	    echo "Unrecognized command line arg: $flag"
-	    ;;
-
-    esac
-done
-
-if [[ "$FAMFS_MODE" == "v1" || "$FAMFS_MODE" == "fuse" ]]; then
-    echo "FAMFS_MODE: $FAMFS_MODE"
-    if [[ "$FAMFS_MODE" == "fuse" ]]; then
-        MOUNT_OPTS="--fuse" # Can drop this b/c fuse is the default
-    else
-        MOUNT_OPTS="--nofuse" # Can drop this b/c fuse is the default
-    fi
-else
-    echo "FAMFS_MODE: invalid"
-    exit 1;
-fi
-
-MOUNT="sudo $VG $BIN/famfs mount $MOUNT_OPTS"
-MKFS="sudo $VG $BIN/mkfs.famfs"
-CLI="sudo $VG $BIN/famfs"
-CLI_NOSUDO="$VG $BIN/famfs"
 TEST="test_shadow_yaml"
 
-source $SCRIPTS/test_funcs.sh
-# Above this line should be the same for all smoke tests
+source smoke/test_header.sh
+source "$SCRIPTS/test_funcs.sh"
 
-set -x
+start_test $TEST
 
-# Start with a clean, empty file systeem
+#set -x
+
+# Start with a clean, empty file system
 famfs_recreate "test_shadow_yaml"
 
-verify_mounted $DEV $MPT $TEST
-
-verify_mounted $DEV $MPT "$TEST.sh mounted"
+verify_mounted "$DEV" "$MPT" "$TEST"
+verify_mounted "$DEV" "$MPT" "$TEST.sh mounted"
 
 # Dump icache stats before umount
 if [[ "$FAMFS_MODE" == "fuse" ]]; then
-    # turn up log debug
-    sudo curl  --unix-socket $(scripts/famfs_shadow.sh /mnt/famfs)/sock \
-	 http://localhost/icache_stats
+    expect_good sudo curl \
+        --unix-socket "$(scripts/famfs_shadow.sh "$MPT")/sock" \
+        http://localhost/icache_stats \
+        -- "icache_stats REST query"
 fi
 
-sudo $UMOUNT $MPT || fail "$TEST.sh umount"
-verify_not_mounted $DEV $MPT "$TEST.sh"
+# Unmount
+expect_good sudo "$UMOUNT" "$MPT" -- "$TEST.sh umount"
+verify_not_mounted "$DEV" "$MPT" "$TEST.sh"
 
-# Test shadow logplay while the fs is not mounted
+#
+# Test shadow logplay while fs is NOT mounted
+#
 SHADOWPATH=/tmp/shadowpath/root
-${CLI} logplay --shadow -d /dev/bogodax && fail "shadow logplay should fail with bogus daxdev"
-sudo rm -rf $SHADOWPATH
-${CLI} logplay --shadow $SHADOWPATH/frob --daxdev $DEV -vv   && \
-    fail "shadow logplay to nonexistent shadow dir should fail if parent doesn't exist"
-${CLI} logplay --daxdev $DEV $SHADOWPATH -vv && \
-    fail "logplay should fail if --daxdev is set without --shadow"
-${CLI} logplay --shadow /etc/passwd --daxdev $DEV -vv  && \
-    fail "shadow logplay to regular file should fail"
+sudo rm -rf "$SHADOWPATH"
 
-sudo rm -rf $SHADOWPATH
-sudo mkdir -p $SHADOWPATH
-${CLI} logplay --shadow $SHADOWPATH --daxdev $DEV -vv  || \
-    fail "shadow logplay to existing shadow dir should succeed"
-${CLI} logplay --shadow $SHADOWPATH --daxdev $DEV -vv || \
-    fail "redo shadow logplay to existing shadow dir should succeed"
+expect_fail "${CLI[@]}" logplay --shadow -d /dev/bogodax -- \
+    "shadow logplay should fail with bogus daxdev"
 
-# --shadowtest arg means re-parse yaml to test
-# (if shadow the files are not already present)
-sudo rm -rf $SHADOWPATH/*
-${CLI} logplay --shadow $SHADOWPATH --shadowtest --daxdev $DEV  -vv  || \
-    fail "shadow logplay with yaml test to existing shadow dir should succeed"
+expect_fail "${CLI[@]}" logplay --shadow "$SHADOWPATH/frob" --daxdev "$DEV" -vv -- \
+    "shadow logplay to nonexistent shadow dir should fail if parent doesn't exist"
+verify_dev_not_mounted $DEV "$DEV mounted after failed dax logplay"
+expect_fail "${CLI[@]}" logplay --daxdev "$DEV" "$SHADOWPATH" -vv -- \
+    "logplay should fail if --daxdev is set without --shadow"
+verify_dev_not_mounted $DEV "$DEV mounted after failed dax logplay 2"
 
+echo "next:" "${CLI[@]}" logplay --shadow /etc/passwd --daxdev "$DEV" -vv
+
+expect_fail "${CLI[@]}" logplay --shadow /etc/passwd --daxdev "$DEV" -vv -- \
+    "shadow logplay to regular file should fail"
+verify_dev_not_mounted $DEV "$DEV mounted after failed dax logplay 3"
+
+# valid shadow dir
+sudo rm -rf "$SHADOWPATH"
+sudo mkdir -p "$SHADOWPATH"
+df -hT
+expect_good "${CLI[@]}" logplay --shadow "$SHADOWPATH" --daxdev "$DEV" -vv -- \
+	    "shadow logplay to existing shadow dir should succeed"
+verify_dev_not_mounted $DEV "$DEV mounted after successful dax logplay"
+
+expect_good "${CLI[@]}" logplay --shadow "$SHADOWPATH" --daxdev "$DEV" -vv -- \
+    "redo shadow logplay should succeed"
+verify_dev_not_mounted $DEV "$DEV mounted after successful dax logplay 2"
+
+# shadowtest → re-parse YAML
+sudo rm -rf "$SHADOWPATH"/*
+expect_good "${CLI[@]}" logplay --shadow "$SHADOWPATH" --shadowtest --daxdev "$DEV" -vv -- \
+    "shadow logplay with yaml test should succeed"
+verify_dev_not_mounted $DEV "$DEV mounted after successful dax logplay 3"
+
+# shadow logplay without permissions
 sudo rm -rf /tmp/famfs2
 sudo mkdir /tmp/famfs2
-${CLI_NOSUDO} logplay --shadow /tmp/famfs2 --daxdev $DEV -vv && \
-    fail "shadow logplay to non-writable shadow dir should fail"
+expect_fail "${CLI_NOSUDO[@]}" logplay --shadow /tmp/famfs2 --daxdev "$DEV" -vv -- \
+    "shadow logplay to non-writable shadow dir should fail"
+verify_dev_not_mounted $DEV "$DEV mounted after failed dax logplay 4"
 sudo rm -rf /tmp/famfs2
 
-SHADOWPATH2=/tmp/famfs_shadowpath2
-sudo rm -rf $SHADOWPATH2
-sudo mkdir $SHADOWPATH2
+# Remount famfs after shadow tests
+expect_good "${MOUNT[@]}" "$DEV" "$MPT" -- "remount after shadow yaml test should work"
+verify_mounted "$DEV" "$MPT" "$TEST.sh mounted 2"
 
-sudo cat <<EOF > $SHADOWPATH2/0505
----
-file:
-  path: 0505
-  size: 1048576
-  flags: 2
-  mode: 00
-  uid: 0
-  gid: 0
-  nextents: 1
-  simple_ext_list:
-  - offset: 0x3fc00000
-    length: 0x200000
-...
-EOF
+#
+# Test actual FUSE shadow pathing via famfs_fused
+#
+FAMFS_FUSED=(sudo "$BIN/famfs_fused")
 
-${MOUNT} $DEV $MPT || fail "remount after shadow yaml test should work"
-verify_mounted $DEV $MPT "$TEST.sh mounted 2"
+expect_good "${CLI[@]}" creat -s 3g      "$MPT/memfile"   -- "create memfile"
+expect_good "${CLI[@]}" creat -s 100m    "$MPT/memfile1"  -- "creat with -s 100m"
+expect_good "${CLI[@]}" creat -s 10000k  "$MPT/memfile2"  -- "creat with -s 10000k"
+expect_good "${CLI[@]}" mkdir            "$MPT/tmpdir"    -- "mkdir should succeed"
 
-# TODO: move this to new smoke/test_fused.sh
-FAMFS_FUSED="sudo $BIN/famfs_fused"
-
-${CLI} creat -s 3g  ${MPT}/memfile       || fail "can't create memfile"
-${CLI} creat -s 100m ${MPT}/memfile1     || fail "creat should succeed with -s 100m"
-${CLI} creat -s 10000k ${MPT}/memfile2   || fail "creat with -s 10000k should succeed"
-${CLI} mkdir ${MPT}/tmpdir || fail "mkdir should succeed"
 FUSE_SHADOW="/tmp/s/root"
-
 FUSE_MPT="/tmp/famfs_fuse"
-sudo rm -rf $FUSE_SHADOW
-mkdir -p $FUSE_SHADOW $FUSE_MPT
+sudo rm -rf "$FUSE_SHADOW"
+mkdir -p "$FUSE_SHADOW" "$FUSE_MPT"
 
-${CLI} logplay --shadow $FUSE_SHADOW --daxdev $DEV  -vv || \
-    fail "shadow logplay to ${FUSE_SHADOW} should succeed"
 
-${FAMFS_FUSED} --help || fail "famfs_fused --help should succeed"
-${FAMFS_FUSED} --version || fail "famfs_fused --version should succeed"
+#
+# This dax logplay is super squirrely; on older famfs it will succeed even
+# though DEV is mounted; on 6.18+ famfs, it will fail. Keeping the test but
+# changing to stop_on_crash
+stop_on_crash "${CLI[@]}" logplay --shadow "$FUSE_SHADOW" --daxdev "$DEV" -vv \
+	      -- "shadow logplay to $FUSE_SHADOW should succeed"
 
-# Test some bad args
-${FAMFS_FUSED} -df -o source=${FUSE_SHADOW} && fail "fused should fail w/missing MPT"
-${FAMFS_FUSED} -df  $FUSE_MPT && fail "fused should fail w/missing source"
-${FAMFS_FUSED} -o source=/bad/mpt $FUSE_MPT && fail "fused should fail w/bad MPT"
-${FAMFS_FUSED} -o source=/etc/passwd $FUSE_MPT && fail "fused should fail w/file as mpt"
-#${FAMFS_FUSED} -o source=${FUSE_SHADOW} -o foo=bar $FUSE_MPT && \
-#    fail "fused should fail with bad -o opt (-o foo=bar)"
+expect_good "${FAMFS_FUSED[@]}" --help    -- "famfs_fused --help should succeed"
+expect_good "${FAMFS_FUSED[@]}" --version -- "famfs_fused --version should succeed"
 
-# Get the kernel version string (e.g., "5.15.0-27-generic")
+# Bad args for fused
+expect_fail "${FAMFS_FUSED[@]}" -df -o source="$FUSE_SHADOW" -- \
+    "fused should fail w/missing MPT"
+expect_fail "${FAMFS_FUSED[@]}" -df "$FUSE_MPT" -- \
+    "fused should fail w/missing source"
+expect_fail "${FAMFS_FUSED[@]}" -o source=/bad/mpt "$FUSE_MPT" -- \
+    "fused should fail w/bad MPT"
+expect_fail "${FAMFS_FUSED[@]}" -o source=/etc/passwd "$FUSE_MPT" -- \
+    "fused should fail with file as mpt"
+
+#
+# Extract kernel major/minor
+#
 kernel_version=$(uname -r)
-
-# Use a regex to extract the major and minor version numbers
 if [[ $kernel_version =~ ^([0-9]+)\.([0-9]+) ]]; then
     major=${BASH_REMATCH[1]}
     minor=${BASH_REMATCH[2]}
 else
-    echo "Error: Unable to parse the kernel version: $kernel_version" >&2
+    echo "Error: Unable to parse kernel version: $kernel_version" >&2
     exit 1
 fi
 
 echo "Major Version: $major"
 echo "Minor Version: $minor"
 
-if [[ "${FAMFS_MODE}" == "fuse" ]]; then
-    # Stuff that should fail
-    sudo truncate --size 0 $MPT/memfile     && fail "truncate fuse file should fail"
-    sudo mkdir $MPT/mydir                   && fail "mkdir should fail in fuse"
-    sudo ln $MPT/newlink $MPT/memfile  && fail "ln hard link in fuse should fail"
-    sudo ln -s $MPT/slink $MPT/memfile && fail "ln soft link in fuse should fail"
-    sudo mknod $MPT/myblk b 100 100    && fail "mknod special file should fail in fuse"
-    sudo rmdir $MPT/tmpdir             && fail "rmdir should fail in fuse"
-    sudo rm $MPT/memfile               && fail "rm file in fuse should fail"
-    sudo touch $MPT/touchfile          && fail "touch new file in fuse should fail"
-elif [[ "${FAMFS_MODE}" == "v1" && "$major" -ge 6 && "$minor" -ge 12 ]]; then
-    # Stuff that should fail
-    sudo truncate --size 0 $MPT/memfile     && fail "truncate famfsv1 file should fail"
-    sudo ln $MPT/newlink $MPT/memfile  && fail "ln hard link in famfsv1 should fail"
-    sudo ln -s $MPT/slink $MPT/memfile && fail "ln soft link in famfsv1 should fail"
-    sudo mknod $MPT/myblk b 100 100    && fail "mknod special file should fail in famfsv1"
-    sudo rmdir $MPT/tmpdir             && fail "rmdir should fail in famfsv1"
-    sudo rm $MPT/memfile               && fail "rm file in famfsv1 should fail"
+#
+# Negative tests for operations not allowed in fuse/v1
+#
+if [[ "$FAMFS_MODE" == "fuse" ]]; then
+
+    expect_fail sudo truncate --size 0 "$MPT/memfile"    -- "truncate fuse should fail"
+    expect_fail sudo mkdir "$MPT/mydir"                  -- "mkdir in fuse should fail"
+    expect_fail sudo ln "$MPT/newlink" "$MPT/memfile"    -- "hardlink fuse should fail"
+    expect_fail sudo ln -s "$MPT/slink" "$MPT/memfile"   -- "symlink fuse should fail"
+    expect_fail sudo mknod "$MPT/myblk" b 100 100        -- "mknod fuse should fail"
+    expect_fail sudo rmdir "$MPT/tmpdir"                 -- "rmdir fuse should fail"
+    expect_fail sudo rm "$MPT/memfile"                   -- "rm fuse should fail"
+    expect_fail sudo touch "$MPT/touchfile"              -- "touch fuse should fail"
+
+elif [[ "$FAMFS_MODE" == "v1" && "$major" -ge 6 && "$minor" -ge 12 ]]; then
+
+    expect_fail sudo truncate --size 0 "$MPT/memfile"    -- "truncate v1 should fail"
+    expect_fail sudo ln "$MPT/newlink" "$MPT/memfile"    -- "hardlink v1 should fail"
+    expect_fail sudo ln -s "$MPT/slink" "$MPT/memfile"   -- "symlink v1 should fail"
+    expect_fail sudo mknod "$MPT/myblk" b 100 100        -- "mknod v1 should fail"
+    expect_fail sudo rmdir "$MPT/tmpdir"                 -- "rmdir v1 should fail"
+    expect_fail sudo rm "$MPT/memfile"                   -- "rm v1 should fail"
+
 else
     echo "test_shadow_yaml: skipping some tests due to older famfs and kernel"
 fi
 
-echo 3 | sudo tee /proc/sys/vm/drop_caches
+#
+# Drop caches for consistency
+#
+echo 3 | sudo tee /proc/sys/vm/drop_caches >/dev/null
 
-# work thorugh permissions of different mount types here
-#find $FUSE_MPT || fail "Find to recursively list fuse should succeed"
-
-mkdir -p ~/smoke.shadow
-${CLI} logplay --shadow ~/smoke.shadow/test_shadow_yaml.shadow $MPT
+# TODO: test permissions / recursive find in fuse mount
 
 set +x
-echo ":==*************************************************************************"
-echo ":==$TEST completed successfully"
-echo ":==*************************************************************************"
+finish_test $TEST
 exit 0

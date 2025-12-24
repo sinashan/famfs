@@ -1,190 +1,193 @@
 #!/usr/bin/env bash
 
-cwd=$(pwd)
-
-# Defaults
-VG=""
-SCRIPTS=../scripts
-RAW_MOUNT_OPTS="-t famfs -o noatime -o dax=always "
-BIN=../debug
-VALGRIND_ARG="valgrind --leak-check=full --show-leak-kinds=all --track-origins=yes"
-RMMOD=0
-FAMFS_MOD="famfs.ko"
-
-# Allow these variables to be set from the environment
-if [ -z "$DEV" ]; then
-    DEV="/dev/dax0.0"
-fi
-if [ -z "$MPT" ]; then
-    MPT=/mnt/famfs
-fi
-if [ -z "$UMOUNT" ]; then
-    UMOUNT="umount"
-fi
-if [ -z "${FAMFS_MODE}" ]; then
-    FAMFS_MODE="v1"
-fi
-
-# Override defaults as needed
-while (( $# > 0)); do
-    flag="$1"
-    shift
-    case "$flag" in
-	(-M|--module)
-	    FAMFS_MOD=$1
-	    shift
-	    ;;
-	(-d|--device)
-	    DEV=$1
-	    shift;
-	    ;;
-	(-b|--bin)
-	    BIN=$1
-	    shift
-	    ;;
-	(-s|--scripts)
-	    SCRIPTS=$1
-	    source_root=$1;
-	    shift;
-	    ;;
-	(-m|--mode)
-	    FAMFS_MODE="$1"
-	    shift
-	    ;;
-	(-v|--valgrind)
-	    # no argument to -v; just setup for Valgrind
-	    VG=${VALGRIND_ARG}
-	    ;;
-	*)
-	    echo "Unrecognized command line arg: $flag"
-	    ;;
-
-    esac
-done
-
-if [[ "$FAMFS_MODE" == "v1" || "$FAMFS_MODE" == "fuse" ]]; then
-    echo "FAMFS_MODE: $FAMFS_MODE"
-    if [[ "$FAMFS_MODE" == "fuse" ]]; then
-        MOUNT_OPTS="--fuse" # Can drop this b/c fuse is the default
-    else
-        MOUNT_OPTS="--nofuse" # Can drop this b/c fuse is the default
-    fi
-else
-    echo "FAMFS_MODE: invalid"
-    exit 1;
-fi
-
-MOUNT="sudo $VG $BIN/famfs mount $MOUNT_OPTS"
-MKFS="sudo $VG $BIN/mkfs.famfs"
-CLI="sudo $VG $BIN/famfs"
-CLI_NOSUDO="$VG $BIN/famfs"
 TEST="test3"
 
-source $SCRIPTS/test_funcs.sh
-# Above this line should be the same for all smoke tests
+source smoke/test_header.sh
+source "$SCRIPTS/test_funcs.sh"
 
-set -x
+start_test $TEST
 
-# Start with a clean, empty file systeem
+#set -x
+
+# Start with a clean, empty file system
 famfs_recreate "test3"
 
-verify_mounted $DEV $MPT "test2.sh"
+verify_mounted "$DEV" "$MPT" "test3.sh"
 
-${CLI} creat -r -s 4096 -S 1 $MPT/ddtest    || fail "creat ddfile"
-${CLI} verify -S 1 -f $MPT/ddtest           || fail "verify ddfile creat"
-${CLI} cp $MPT/ddtest $MPT/ddtest_copy      || fail "copy ddfile should succeed"
-sudo dd if=/dev/zero of=$MPT/ddtest bs=4096 count=1 conv=notrunc  || fail "dd into ddfile"
-${CLI} verify -S 1 -f $MPT/ddtest           && fail "verify should fail after dd overwrite"
-sudo dd of=/dev/null if=$MPT/ddtest bs=4096 || fail "dd out of ddfile"
+expect_good "${CLI[@]}" creat -r -s 4096 -S 1 "$MPT/ddtest" \
+           -- "creat ddfile"
+expect_good "${CLI[@]}" verify -S 1 -f "$MPT/ddtest" \
+           -- "verify ddfile creat"
+expect_good "${CLI[@]}" cp "$MPT/ddtest" "$MPT/ddtest_copy" \
+            -- "copy ddfile should succeed"
+# This will overwrite the seeded contents of ddfile
+expect_good sudo dd if=/dev/zero of="$MPT/ddtest" bs=4096 count=1 conv=notrunc \
+           -- "dd into ddfile"
+expect_fail "${CLI[@]}" verify -S 1 -f "$MPT/ddtest" \
+           -- "verify should fail after dd overwrite"
+expect_good sudo dd of=/dev/null if="$MPT/ddtest" bs=4096 \
+           -- "dd out of ddfile"
+mount_alive $MPT
 
 #
 # Test some cases where the kmod should throw errors because the famfs file is
 # not in a valid state
 #
-sudo truncate $MPT/ddtest -s 2048
-if (( $? == 0 )); then
-    # This should be reconsidered when we no longer support kmods that
-    # allow truncate XXX
-    echo "--------------------------------------------"
-    echo "This kernel allows truncate"
-    echo "--------------------------------------------"
-    assert_file_size "$MPT/ddtest" 2048 "bad size after rogue truncate"
-    sudo dd of=/dev/null if=$MPT/ddtest bs=2048 \
-	&& fail "Any read from a truncated file should fail"
-    sudo truncate $MPT/ddtest -s 4096           \
-	|| fail "truncate extra-hinky - back to original size"
-    assert_file_size "$MPT/ddtest"  4096 "bad size after second rogue truncate"
-    sudo dd of=/dev/null if=$MPT/ddtest bs=2048 \
-	&& fail "Read from previously horked file should fail"
+if [[ "${FAMFS_MODE}" == "v1" ]]; then
+    set +e
+    sudo truncate "$MPT/ddtest" -s 2048
+    rc="$?"
+    set -e
+    if (( rc == 0 )); then
+	# This should be reconsidered when we no longer support kmods that
+	# allow truncate XXX
+	echo "--------------------------------------------"
+	echo "This kernel allows truncate"
+	echo "--------------------------------------------"
+	assert_file_size "$MPT/ddtest" 2048 "bad size after rogue truncate"
+	expect_fail sudo dd of=/dev/null if="$MPT/ddtest" bs=2048 \
+		    -- "Any read from a truncated file should fail"
+	expect_good sudo truncate "$MPT/ddtest" -s 4096 \
+		    -- "truncate extra-hinky - back to original size"
+	assert_file_size "$MPT/ddtest" 4096 "bad size after second rogue truncate"
+	expect_fail sudo dd of=/dev/null if="$MPT/ddtest" bs=2048 \
+		    -- "Read from previously horked file should fail"
+    else
+	mount_alive $MPT
+    fi
 fi
+
 
 # Test behavior of standard "cp" into famfs
 # The create should succeed, but the write should fail, leaving an empty, invalid file
-sudo cp /etc/passwd $MPT/pwd && fail "cp to famfs should fail due to invalid famfs metadata"
-if [[ "${FAMFS_MODE}" == "v1" ]]; then
-    test -f $MPT/pwd || fail "v1 cp should leave an invalid destination file"
-    test -s $MPT/pwd && fail "file from cp should be empty"
-    # Create an invalid file via "touch" and test behavior
-    sudo touch $MPT/touchfile || fail "touch should succeed at creating an invalid file"
-    sudo dd if=$MPT/touchfile && fail "dd from invalid file should fail"
-
-    sudo truncate $MPT/touchfile -s 8192
-    if (( $? == 0 )); then
-	# This should be reconsidered when we no longer support kmods that
-	# allow truncate XXX
-	sudo dd if=$MPT/touchfile of=/dev/null bs=8192 count=1  \
-	    && fail "dd from touchfile should fail"
-	sudo dd if=/dev/zero of=$MPT/touchfile bs=8192 count=1  \
-	    && fail "dd to touchfile should fail"
-    fi
+# (Inline "expect_fail" semantics here to avoid mysterious early exits.)
+set +e
+echo ":= sudo cp /etc/passwd $MPT/pwd"
+sudo cp /etc/passwd "$MPT/pwd"
+cp_status=$?
+set -e
+if (( cp_status == 0 )); then
+    fail "cp to famfs should fail due to invalid famfs metadata: commanzd succeeded unexpectedly"
 else
-    test -f $MPT/pwd && fail "non-cli cp to famfs/fuse should fail outright"
-    # Create an invalid file via "touch" and test behavior
-    sudo touch $MPT/touchfile && fail "non-cli touch should fail in famfs/fuse"
-    sudo dd if=$MPT/touchfile && fail "dd from missing file should fail"
+    echo ":= cp to famfs: good failure (cp to famfs should fail due to invalid famfs metadata, exit $cp_status)"
 fi
 
-stat $MPT/ddtest
+if [[ "${FAMFS_MODE}" == "v1" ]]; then
+    expect_good test -f "$MPT/pwd" \
+               -- "v1 cp should leave an invalid destination file"
+
+    # Inline expect_fail for: test -s $MPT/pwd (we expect it to FAIL, i.e., file is empty)
+    set +e
+    echo ":= test -s $MPT/pwd"
+    test -s "$MPT/pwd"
+    ts_status=$?
+    set -e
+    if (( ts_status == 0 )); then
+        fail "file from cp should be empty: test -s succeeded (file is non-empty)"
+    else
+        echo ":= test -s: good failure (file from cp should be empty, exit $ts_status)"
+    fi
+
+    # Create an invalid file via "touch" and test behavior
+    expect_good sudo touch "$MPT/touchfile" \
+               -- "touch should succeed at creating an invalid file"
+
+    # Inline expect_fail for the dd read-from-invalid-file case
+    set +e
+    echo ":= sudo dd if='$MPT/touchfile' of=/dev/null"
+    sudo dd if="$MPT/touchfile" of=/dev/null bs=4096 count=1
+    dd_status=$?
+    set -e
+    if (( dd_status == 0 )); then
+	fail "dd from invalid file should fail: command unexpectedly succeeded"
+    else
+	echo ":= dd: good failure (dd from invalid file should fail, exit $dd_status)"
+    fi
+
+    set +e
+    sudo truncate "$MPT/touchfile" -s 8192
+    rc="$?"
+    set -e
+    if (( "$rc" == 0 )); then
+        # This should be reconsidered when we no longer support kmods that
+        # allow truncate XXX
+        expect_fail sudo dd if="$MPT/touchfile" of=/dev/null bs=8192 count=1 \
+            -- "dd from touchfile should fail"
+        expect_fail sudo dd if=/dev/zero of="$MPT/touchfile" bs=8192 count=1 \
+            -- "dd to touchfile should fail"
+    fi
+else
+    expect_good mount_alive $MPT
+    expect_fail test -f "$MPT/pwd" \
+               -- "non-cli cp to famfs/fuse should fail outright"
+    # Create an invalid file via "touch" and test behavior
+    expect_good mount_alive $MPT
+    expect_fail sudo touch "$MPT/touchfile" \
+               -- "non-cli touch should fail in famfs/fuse"
+    expect_good mount_alive $MPT
+    expect_fail sudo dd if="$MPT/touchfile" \
+               -- "dd from missing file should fail"
+fi
+
+expect_good mount_alive $MPT
+
+sudo ls -al $MPT
+expect_good stat "$MPT/ddtest" -- "stat ddtest should work"
 
 # Dump icache stats before umount
 if [[ "$FAMFS_MODE" == "fuse" ]]; then
-    # turn up log debug
-    sudo curl  --unix-socket $(scripts/famfs_shadow.sh /mnt/famfs)/sock \
-	 http://localhost/icache_stats
+    expect_good sudo curl \
+        --unix-socket "$(scripts/famfs_shadow.sh "$MPT")/sock" \
+        http://localhost/icache_stats \
+        -- "icache_stats"
 fi
 
 # unmount and remount
-sudo $UMOUNT $MPT || fail "umount"
+expect_good sudo "$UMOUNT" "$MPT" -- "umount"
+
+# findmnt may legitimately fail if nothing is mounted; don't let set -e kill us
+set +e
 findmnt -t famfs
-verify_not_mounted $DEV $MPT "test3"
+set -e
+
+verify_not_mounted "$DEV" "$MPT" "test3"
 sleep 1
-${MOUNT} $DEV $MPT
-verify_mounted $DEV $MPT "test3 x"
+
+expect_good "${MOUNT[@]}" "$DEV" "$MPT" -- "remount test3"
+verify_mounted "$DEV" "$MPT" "test3 x"
+
+set +e
 findmnt -t famfs
+set -e
 
-sudo stat $MPT/ddtest
+expect_good sudo stat "$MPT/ddtest" -- "stat ddtest after remount should work"
 
-# Test that our invalid files from above are going after umount/mount
-sudo test -f $MPT/touchfile           && fail "touchfile should have disappeared"
-sudo test -f $MPT/pwd                 && fail "pwd file should have disappeared"
-sudo test -f $MPT/ddtest              || fail "ddtest file should have reappeared and become valid again"
+# Test that our invalid files from above are gone after umount/mount
+
+#
+# Note shell builtins don't work well with expect_fail() etc.
+sudo test -f "$MPT/touchfile" && fail "touchfile should have disappeared"
+sudo test -f "$MPT/pwd" && fail "pwd file should have disappeared"
+sudo test -f "$MPT/ddtest" || "ddtest file should have reappeared and become valid again"
 
 # Unmounting and remounting the file system should have restored the ddtest file's
 # size after the rogue truncate above. Double check this
-
 assert_file_size "$MPT/ddtest" 4096 "bad file size after remount"
 
-${CLI} verify -S 1 -f $MPT/ddtest && fail "verify ddfile should fail since it was overwritten"
-sudo dd conv=notrunc if=$MPT/ddtest_copy of=$MPT/ddtest bs=2048 || fail "dd contents back into ddfile"
-${CLI} verify -S 1 -f $MPT/ddtest || fail "verify ddfile should succeed since contents put back"
+expect_fail "${CLI[@]}" verify -S 1 -f "$MPT/ddtest" \
+           -- "verify ddfile should fail since it was overwritten"
+expect_good sudo dd conv=notrunc if="$MPT/ddtest_copy" of="$MPT/ddtest" bs=2048 \
+           -- "dd contents back into ddfile"
+expect_good "${CLI[@]}" verify -S 1 -f "$MPT/ddtest" \
+           -- "verify ddfile should succeed since contents put back"
 
-${CLI} fsck $MPT || fail "fsck should succeed - no cross links yet"
+expect_good "${FSCK[@]}" "$MPT" -- "fsck should succeed - no cross links yet"
 
-mkdir -p ~/smoke.shadow
-${CLI} logplay --shadow ~/smoke.shadow/test3.shadow $MPT
+expect_good sudo mkdir -p /tmp/smoke.shadow/test3.shadow/root \
+           -- "mkdir shadow"
+expect_good "${CLI[@]}" logplay -Ss /tmp/smoke.shadow/test3.shadow "$MPT" \
+           -- "test3 shadow logplay"
 
 set +x
-echo ":==*************************************************************************"
-echo ":==test3 completed successfully"
-echo ":==*************************************************************************"
+finish_test $TEST
 exit 0

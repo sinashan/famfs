@@ -43,18 +43,18 @@ while (( $# > 0)); do
 	(-F|--nofuse)
 	    FAMFS_MODE="v1"
 	    ;;
+	(-D|--nodax)
+	    NODAX_ARG="-D"
+	    ;;
+	(-l|--log)
+	    LOG_ARG="--log"
+	    ;;
 	(-e|--noerrors)
 	    SKIP_ERRS=0
 	    ;;
 	(--jmg) # For debugging an intermittent segfault in test1.sh
-	    SKIP_TEST0=1
 	    SKIP_SHADOW_YAML=1
-	    #SKIP_TEST2=1
-	    SKIP_TEST3=1
 	    SKIP_TEST4=1
-	    SKIP_PCQ=1
-	   # SKIP_FIO=1
-	    SKIP_STRIPE_TEST=1
 	    ;;
 	(-E|--justerrors)
 	    SKIP_TEST0=1
@@ -81,8 +81,8 @@ while (( $# > 0)); do
 	    SKIP_TEST3=1
 	    SKIP_TEST4=1
 	    #SKIP_PCQ=1
-	    SKIP_FIO=1
-	    SKIP_SHADOW_YAML=1
+	    #SKIP_FIO=1
+	    #SKIP_SHADOW_YAML=1
 	    SKIP_STRIPE_TEST=1
 	    COVERAGE=0
 	    ;;
@@ -105,6 +105,10 @@ while (( $# > 0)); do
 	(--stripe)
 	    # Just test0 and test_shadow_yaml
 	    #SKIP_TEST0=1
+	    SKIP_TEST1=1
+	    SKIP_TEST2=1
+	    SKIP_TEST3=1
+	    SKIP_TEST4=1
 	    SKIP_PCQ=1
 	    SKIP_FIO=1
 	    SKIP_ERRS=1
@@ -242,11 +246,11 @@ if [[ "$SCRIPTS" =~ *[[:space:]]* ]]; then
     fail "ERROR: the SCRIPTS path ($SCRIPTS) contains spaces!"
 fi
 
-./smoke/prepare.sh  ${MOD_ARG} $VGARG -b "$BIN" -s "$SCRIPTS" -d $DEV  -m "$FAMFS_MODE" || exit -1
-echo ":== test0 prepare success"
+./smoke/prepare.sh  ${MOD_ARG} $VGARG -b "$BIN" -s "$SCRIPTS" -d $DEV  -m "$FAMFS_MODE" $NODAX_ARG $LOG_ARG || exit -1
+echo ":== prepare success"
 
 if [ -z "$SKIP_TEST0" ]; then
-    ./smoke/test0.sh ${MOD_ARG} $VGARG -b "$BIN" -s "$SCRIPTS" -d $DEV  -m "$FAMFS_MODE" || exit -1
+    ./smoke/test0.sh ${MOD_ARG} $VGARG -b "$BIN" -s "$SCRIPTS" -d $DEV  -m "$FAMFS_MODE" $NODAX_ARG $LOG_ARG || exit -1
     sudo chown -R ${id}:${grp} $BIN # fixup permissions for gcov
     echo ":== test0 success"
     sleep "${SLEEP_TIME}"
@@ -255,7 +259,7 @@ else
 fi
 
 if [ -z "$SKIP_SHADOW_YAML" ]; then
-    ./smoke/test_shadow_yaml.sh ${MOD_ARG} $VGARG -b "$BIN" -s "$SCRIPTS" -d $DEV  -m "$FAMFS_MODE" || exit -1
+    ./smoke/test_shadow_yaml.sh ${MOD_ARG} $VGARG -b "$BIN" -s "$SCRIPTS" -d $DEV  -m "$FAMFS_MODE" $NODAX_ARG $LOG_ARG || exit -1
     sudo chown -R ${id}:${grp} $BIN # fixup permissions for gcov
     echo ":== test_shadow_yaml success"
     sleep "${SLEEP_TIME}"
@@ -264,7 +268,7 @@ else
 fi
 
 if [ -z "$SKIP_TEST1" ]; then
-    sudo ./smoke/test1.sh ${MOD_ARG} $VGARG -b "$BIN" -s "$SCRIPTS" -d $DEV  -m "$FAMFS_MODE" || exit -1
+    sudo ./smoke/test1.sh ${MOD_ARG} $VGARG -b "$BIN" -s "$SCRIPTS" -d $DEV  -m "$FAMFS_MODE" $NODAX_ARG $LOG_ARG || exit -1
     sudo chown -R ${id}:${grp} $BIN # fixup permissions for gcov
     echo ":== test1 success"
     sleep "${SLEEP_TIME}"
@@ -273,7 +277,7 @@ else
 fi
 
 if [ -z "$SKIP_TEST2" ]; then
-    ./smoke/test2.sh ${MOD_ARG} $VGARG -b "$BIN" -s "$SCRIPTS" -d $DEV  -m "$FAMFS_MODE" || exit -1
+    ./smoke/test2.sh ${MOD_ARG} $VGARG -b "$BIN" -s "$SCRIPTS" -d $DEV  -m "$FAMFS_MODE" $NODAX_ARG $LOG_ARG || exit -1
     sudo chown -R ${id}:${grp} $BIN # fixup permissions for gcov
     echo ":== test2 success"
     sleep "${SLEEP_TIME}"
@@ -282,7 +286,7 @@ else
 fi
 
 if [ -z "$SKIP_TEST3" ]; then
-    ./smoke/test3.sh ${MOD_ARG} $VGARG -b "$BIN" -s "$SCRIPTS" -d $DEV  -m "$FAMFS_MODE" || exit -1
+    ./smoke/test3.sh ${MOD_ARG} $VGARG -b "$BIN" -s "$SCRIPTS" -d $DEV  -m "$FAMFS_MODE" $NODAX_ARG $LOG_ARG || exit -1
     sudo chown -R ${id}:${grp} $BIN # fixup permissions for gcov
     echo ":== test3 success"
     sleep "${SLEEP_TIME}"
@@ -291,7 +295,7 @@ else
 fi
 
 if [ -z "$SKIP_TEST4" ]; then
-    ./smoke/test4.sh ${MOD_ARG} $VGARG -b "$BIN" -s "$SCRIPTS" -d $DEV  -m "$FAMFS_MODE" || exit -1
+    ./smoke/test4.sh ${MOD_ARG} $VGARG -b "$BIN" -s "$SCRIPTS" -d $DEV  -m "$FAMFS_MODE" $NODAX_ARG $LOG_ARG || exit -1
     sudo chown -R ${id}:${grp} $BIN # fixup permissions for gcov
     echo ":== test4 success"
     sleep "${SLEEP_TIME}"
@@ -301,7 +305,7 @@ fi
 
 if [ -z "$SKIP_ERRS" ]; then
     sleep "${SLEEP_TIME}"
-    ./smoke/test_errors.sh ${MOD_ARG} $VGARG -b "$BIN" -s "$SCRIPTS" -d $DEV  -m "$FAMFS_MODE" || exit -1
+    ./smoke/test_errors.sh ${MOD_ARG} $VGARG -b "$BIN" -s "$SCRIPTS" -d $DEV  -m "$FAMFS_MODE" $NODAX_ARG $LOG_ARG || exit -1
     echo ":== test_errs success"
     sudo chown -R ${id}:${grp} $BIN # fixup permissions for gcov
 else
@@ -309,7 +313,7 @@ else
 fi
 
 if [ -z "$SKIP_STRIPE_TEST" ] && [ -z "$KABI_42"  ]; then
-    ./smoke/stripe_test.sh ${MOD_ARG} $VGARG -b "$BIN" -s "$SCRIPTS" -d $DEV  -m "$FAMFS_MODE" || exit -1
+    ./smoke/stripe_test.sh ${MOD_ARG} $VGARG -b "$BIN" -s "$SCRIPTS" -d $DEV  -m "$FAMFS_MODE" $NODAX_ARG $LOG_ARG || exit -1
     sudo chown -R ${id}:${grp} $BIN # fixup permissions for gcov
     echo ":== stripe_test success"
     sleep "${SLEEP_TIME}"
@@ -326,7 +330,7 @@ if [[ $COVERAGE -ne 1 ]]; then
 	# XXX: get test_pcq running properly in coverage test mode
 	./smoke/test_pcq.sh ${MOD_ARG} $VGARG \
 			    -b "$BIN" -s "$SCRIPTS" -d $DEV  -m "$FAMFS_MODE" \
-	    || exit -1
+	    $NODAX_ARG $LOG_ARG || exit -1
 	echo ":== test_pcq success"
 	sudo chown -R ${id}:${grp} $BIN # fixup permissions for gcov
 	sleep "${SLEEP_TIME}"
@@ -338,7 +342,7 @@ else
 fi
 
 if [ -z "$SKIP_FIO" ]; then
-    ./smoke/test_fio.sh ${MOD_ARG} $VGARG -b "$BIN" -s "$SCRIPTS" -d $DEV  -m "$FAMFS_MODE" || exit -1
+    ./smoke/test_fio.sh ${MOD_ARG} $VGARG -b "$BIN" -s "$SCRIPTS" -d $DEV  -m "$FAMFS_MODE" $NODAX_ARG $LOG_ARG || exit -1
     echo ":== test_fio success"
     sudo chown -R ${id}:${grp} $BIN # fixup permissions for gcov
     sleep "${SLEEP_TIME}"

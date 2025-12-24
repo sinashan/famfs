@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 /*
- * Copyright (C) 2023-2024 Micron Technology, Inc.  All rights reserved.
+ * Copyright (C) 2023-2025 Micron Technology, Inc.  All rights reserved.
  */
 
 #define _GNU_SOURCE
@@ -32,6 +32,10 @@
 #include <pwd.h>
 #include <grp.h>
 #include <time.h>
+#include <setjmp.h>
+#include <signal.h>
+#include <stdint.h>
+#include <sys/utsname.h>
 
 #include <linux/famfs_ioctl.h>
 
@@ -417,6 +421,49 @@ famfs_get_kernel_type(int verbose)
 }
 
 /**
+ * famfs_get_kernel_version() - Get the running kernel's major and minor version
+ * @major: Output pointer for major version number
+ * @minor: Output pointer for minor version number
+ *
+ * Returns 0 on success, -1 on failure.
+ */
+static int famfs_get_kernel_version(int *major, int *minor)
+{
+	struct utsname uts;
+
+	if (uname(&uts) < 0)
+		return -1;
+
+	if (sscanf(uts.release, "%d.%d", major, minor) != 2)
+		return -1;
+
+	return 0;
+}
+
+/**
+ * famfs_daxmode_required() - Check if kernel requires explicit dax mode setting
+ *
+ * Starting with kernel 6.15, famfs requires explicit binding to the fsdev_dax
+ * driver instead of device_dax.
+ *
+ * Returns true if kernel version >= 6.15, false otherwise.
+ */
+bool famfs_daxmode_required(void)
+{
+	int major, minor;
+
+	if (famfs_get_kernel_version(&major, &minor) < 0)
+		return false; /* On error, assume not required */
+
+	if (major > 6)
+		return true;
+	if (major == 6 && minor >= 15)
+		return true;
+
+	return false;
+}
+
+/**
  * check_file_exists()
  *
  * Check if file at basepath/relpath exists within timeout seconds
@@ -459,8 +506,9 @@ int check_file_exists(
 				    && (size_t)st.st_size != expected_size) {
 					close(fd);
 					fprintf(stderr,
-						"%s: bad size %ld, retry\n",
-						__func__, st.st_size);
+					   "%s: bad size %ld != %ld, retry\n",
+						__func__, st.st_size,
+						expected_size);
 					goto retry;
 				}
 
@@ -625,4 +673,61 @@ void log_file_mode(
 		  timebuf,
 		  name);
 
+}
+
+static sigjmp_buf jmp_env;
+
+/* Async-signal-safe handler */
+static void sigbus_handler(int sig)
+{
+	(void)sig;
+	siglongjmp(jmp_env, 1);
+}
+
+bool ptr_is_readable(const void *p)
+{
+	struct sigaction sa_old, sa_new;
+	bool result;
+
+	/* Install temporary SIGBUS handler */
+	memset(&sa_new, 0, sizeof(sa_new));
+	sa_new.sa_handler = sigbus_handler;
+	sigemptyset(&sa_new.sa_mask);
+	sa_new.sa_flags = SA_NODEFER;   /* don't block SIGBUS while in handler */
+
+	if (sigaction(SIGBUS, &sa_new, &sa_old) < 0) {
+		/* If we can't install the handler, safest answer is "bad" */
+		return false;
+	}
+
+	if (sigsetjmp(jmp_env, 1) == 0) {
+		/*
+		 * Attempt to read from the pointer.
+		 * Use volatile so compiler cannot optimize away.
+		 */
+		volatile uint8_t tmp = *(volatile const uint8_t *)p;
+		(void)tmp;
+
+		result = true;
+	} else {
+		/* We jumped here from the SIGBUS handler */
+		result = false;
+	}
+
+	/* Restore old handler */
+	sigaction(SIGBUS, &sa_old, NULL);
+
+	return result;
+}
+
+int exit_val(int rc) {
+	/* Take absolute value */
+	int val = (rc < 0) ? -rc : rc;
+
+	/* If less than 127, return it; otherwise cap at 127 */
+	if (val < 127) {
+		return val;
+	} else {
+		return 127;
+	}
 }

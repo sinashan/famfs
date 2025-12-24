@@ -6,7 +6,7 @@
   See the file COPYING.
 */
 /*
- * Copyright (C) 2024 Micron Technology, Inc.  All rights reserved.
+ * Copyright (C) 2024-2025 Micron Technology, Inc.  All rights reserved.
  */
 
 #define _GNU_SOURCE
@@ -30,7 +30,6 @@
 #include <systemd/sd-journal.h>
 #include <signal.h>
 
-//#include "../fuse/passthrough_helpers.h"
 #include "famfs_lib.h"
 #include "famfs_fmap.h"
 #include "fuse_kernel.h"
@@ -181,7 +180,7 @@ static void famfs_fused_help(void)
 "    -o source=/home/dir    Source directory to be mounted (required)\n"
 "    -o shadow=/shadow/path Path to the famfs shadow tree\n"
 "    -o daxdev=/dev/dax0.0  Devdax backing device\n"
-"    -o flock               Enable flock\n" //XXX always enable?
+"    -o flock               Enable flock\n" /* XXX always enable? */
 "    -o no_flock            Disable flock\n"
 "    -o timeout=1.0         Caching timeout\n"
 "    -o timeout=0/1         Timeout is set\n"
@@ -241,9 +240,7 @@ static void famfs_init(
 
 static void famfs_destroy(void *userdata)
 {
-	struct famfs_ctx *lo = (struct famfs_ctx*) userdata;
-
-	famfs_icache_destroy(&lo->icache);
+	(void)userdata; /* icache is destroyed in main() after fuse_session_unmount */
 }
 
 static void
@@ -816,7 +813,6 @@ famfs_get_daxdev(
 
 	/* Right now we can only retrieve index 0... */
 	daxdev.index = 0;
-	//daxdev.valid = 1;
 	strncpy(daxdev.name, fd->daxdev_table[daxdev_index].dd_daxdev,
 		FAMFS_DEVNAME_LEN - 1);
 
@@ -1102,10 +1098,10 @@ famfs_do_readdir(
 			errno = 0;
 			d->entry = readdir(d->dp);
 			if (!d->entry) {
-				if (errno) {  // Error
+				if (errno) {  /* Error */
 					err = errno;
 					goto error;
-				} else {  // End of stream
+				} else {  /* End of stream */
 					break; 
 				}
 			}
@@ -1153,10 +1149,12 @@ famfs_do_readdir(
 
     err = 0;
 error:
-    // If there's an error, we can only signal it if we haven't stored
-    // any entries yet - otherwise we'd end up with wrong lookup
-    // counts for the entries that are already in the buffer. So we
-    // return what we've collected until that point.
+    /*
+     * If there's an error, we can only signal it if we haven't stored
+     * any entries yet - otherwise we'd end up with wrong lookup
+     * counts for the entries that are already in the buffer. So we
+     * return what we've collected until that point.
+     */
     if (err && rem == size)
 	    fuse_reply_err(req, err);
     else
@@ -1520,14 +1518,12 @@ famfs_lseek(
 	int whence,
 	struct fuse_file_info *fi)
 {
-	off_t res;
-
+	(void)off;
+	(void)whence;
+	(void)fi;
 	(void)nodeid;
-	res = lseek(fi->fh, off, whence);
-	if (res != -1)
-		fuse_reply_lseek(req, res);
-	else
-		fuse_reply_err(req, errno);
+
+	fuse_reply_lseek(req, 0);
 }
 
 static const struct fuse_lowlevel_ops famfs_oper = {
@@ -1571,7 +1567,7 @@ static const struct fuse_lowlevel_ops famfs_oper = {
 	.forget_multi	= famfs_forget_multi,
 	.flock		= famfs_flock,
 	.fallocate	= famfs_fallocate,
-	//.readdirplus	= famfs_readdirplus,
+	/* .readdirplus	= famfs_readdirplus, */
 #ifdef HAVE_COPY_FILE_RANGE
 	.copy_file_range = famfs_copy_file_range,
 #endif
