@@ -42,20 +42,17 @@ static const char *basename_dev(const char *arg)
 }
 #endif
 
-static struct daxctl_dev *
-find_dax_by_name(struct daxctl_ctx *ctx, const char *want)
+const char *daxdev_mode_string(enum famfs_daxdev_mode mode)
 {
-	struct daxctl_region *region;
-
-	daxctl_region_foreach(ctx, region) {
-		struct daxctl_dev *dev;
-		daxctl_dev_foreach(region, dev) {
-			const char *name = daxctl_dev_get_devname(dev); /* "daxX.Y" */
-			if (name && strcmp(name, want) == 0)
-				return dev;
-		}
+	switch (mode) {
+	case DAXDEV_MODE_UNKNOWN:
+		return "UNKNOWN";
+	case DAXDEV_MODE_DEVICE_DAX:
+		return "devdax";
+	case DAXDEV_MODE_FAMFS:
+		return "famfs";
 	}
-	return NULL;
+	return "INVALID";
 }
 
 /**
@@ -112,33 +109,53 @@ enum famfs_daxdev_mode famfs_get_daxdev_mode(const char *daxdev)
  * @daxdev: Path to the dax device (e.g., "/dev/dax1.0" or "dax1.0")
  * @mode:   Target mode (DAXDEV_MODE_DEVICE_DAX or DAXDEV_MODE_FAMFS)
  *
+ * Retries up to 10 times with exponential backoff if EBUSY is returned.
+ *
  * Returns 0 on success, negative errno on failure.
  */
-int famfs_set_daxdev_mode(const char *daxdev, enum famfs_daxdev_mode mode)
+int famfs_set_daxdev_mode(
+	const char *daxdev,
+	enum famfs_daxdev_mode mode,
+	int verbose)
 {
 	enum famfs_daxdev_mode current_mode;
 	char unbind_path[PATH_MAX];
 	char bind_path[PATH_MAX];
 	const char *unbind_drv;
 	const char *bind_drv;
-	char *devname_copy;
+	char *devname_copy = NULL;
 	char *devbasename;
+	int max_retries = 10;
+	int delay_ms = 100;
 	FILE *fp;
 	int rc = 0;
+	int i;
 
+	if (verbose)
+		printf("%s: change %s to mode %s\n", __func__,
+		       daxdev, daxdev_mode_string(mode));
 	if (!daxdev)
 		return -EINVAL;
 
-	if (mode != DAXDEV_MODE_DEVICE_DAX && mode != DAXDEV_MODE_FAMFS)
+	if (mode != DAXDEV_MODE_DEVICE_DAX && mode != DAXDEV_MODE_FAMFS) {
+		fprintf(stderr, "%s: invalid mode %d\n", __func__, mode);
 		return -EINVAL;
+	}
 
 	/* Check current mode */
 	current_mode = famfs_get_daxdev_mode(daxdev);
-	if (current_mode == mode)
+	if (current_mode == mode) {
+		if (verbose)
+			printf("%s: %s is already in mode %s\n", __func__,
+			       daxdev, daxdev_mode_string(mode));
 		return 0; /* Already in requested mode */
+	}
 
-	if (current_mode == DAXDEV_MODE_UNKNOWN)
+	if (current_mode == DAXDEV_MODE_UNKNOWN) {
+		fprintf(stderr, "%s: Can't change mode from %s\n",
+			__func__, daxdev_mode_string(DAXDEV_MODE_UNKNOWN));
 		return -ENODEV;
+	}
 
 	/* Get basename of device path */
 	devname_copy = strdup(daxdev);
@@ -156,125 +173,112 @@ int famfs_set_daxdev_mode(const char *daxdev, enum famfs_daxdev_mode mode)
 		bind_drv = "device_dax";
 	}
 
+	if (verbose)
+		printf("%s: Changing mode from %s to %s\n", __func__,
+		       daxdev_mode_string(current_mode),
+		       daxdev_mode_string(mode));
+
 	snprintf(unbind_path, sizeof(unbind_path),
 		 "/sys/bus/dax/drivers/%s/unbind", unbind_drv);
 	snprintf(bind_path, sizeof(bind_path),
 		 "/sys/bus/dax/drivers/%s/bind", bind_drv);
 
-	/* Unbind from current driver */
-	fp = fopen(unbind_path, "w");
-	if (!fp) {
-		rc = -errno;
-		fprintf(stderr, "%s: failed to open %s: %s\n",
-			__func__, unbind_path, strerror(errno));
-		goto out;
-	}
-	if (fprintf(fp, "%s", devbasename) < 0) {
-		rc = -errno;
-		fprintf(stderr, "%s: failed to write to %s: %s\n",
-			__func__, unbind_path, strerror(errno));
-		fclose(fp);
-		goto out;
-	}
-	fclose(fp);
+	for (i = 0; i < max_retries; i++) {
+		rc = 0;
 
-	/* Bind to new driver */
-	fp = fopen(bind_path, "w");
-	if (!fp) {
-		rc = -errno;
-		fprintf(stderr, "%s: failed to open %s: %s\n",
-			__func__, bind_path, strerror(errno));
-		goto out;
-	}
-	if (fprintf(fp, "%s", devbasename) < 0) {
-		rc = -errno;
-		fprintf(stderr, "%s: failed to write to %s: %s\n",
-			__func__, bind_path, strerror(errno));
+		/* Unbind from current driver */
+		fp = fopen(unbind_path, "w");
+		if (!fp) {
+			rc = -errno;
+			if (errno == EBUSY)
+				goto retry;
+			fprintf(stderr, "%s: failed to open %s: %s\n",
+				__func__, unbind_path, strerror(errno));
+			if (errno == EACCES || errno == EPERM)
+				fprintf(stderr,
+					"%s: switching dax drivers requires root; try running with sudo\n",
+					__func__);
+			goto out;
+		}
+		if (fprintf(fp, "%s", devbasename) < 0) {
+			rc = -errno;
+			fclose(fp);
+			if (errno == EBUSY)
+				goto retry;
+			fprintf(stderr, "%s: failed to write to %s: %s\n",
+				__func__, unbind_path, strerror(errno));
+			goto out;
+		}
 		fclose(fp);
-		goto out;
+
+		/* Bind to new driver */
+		fp = fopen(bind_path, "w");
+		if (!fp) {
+			rc = -errno;
+			if (errno == EBUSY)
+				goto retry;
+			fprintf(stderr, "%s: failed to open %s: %s\n",
+				__func__, bind_path, strerror(errno));
+			goto out;
+		}
+		if (fprintf(fp, "%s", devbasename) < 0) {
+			rc = -errno;
+			fclose(fp);
+			if (errno == EBUSY)
+				goto retry;
+			fprintf(stderr, "%s: failed to write to %s: %s\n",
+				__func__, bind_path, strerror(errno));
+			goto out;
+		}
+		fclose(fp);
+
+		/* Verify the mode actually changed */
+		current_mode = famfs_get_daxdev_mode(daxdev);
+		if (current_mode == mode) {
+			/* Success */
+			if (verbose)
+				printf("%s: Success: mode from from %s to %s\n",
+				       __func__,
+				       daxdev_mode_string(current_mode),
+				       daxdev_mode_string(mode));
+
+
+			rc = 0;
+			goto out;
+		}
+
+		/*
+		 * Mode didn't change - this can happen if unbind was silently
+		 * blocked due to an active holder (kernel logs this but sysfs
+		 * write still returns success). Retry with backoff.
+		 */
+		rc = -EBUSY;
+		/* fall through to retry */
+
+retry:
+		
+		if (i < max_retries - 1) {
+			if (verbose)
+				printf("%s: retry %d (mode=%s, target=%s)\n",
+				       __func__, i + 1,
+				       daxdev_mode_string(current_mode),
+				       daxdev_mode_string(mode));
+
+			usleep(delay_ms * 1000);
+			delay_ms *= 2; /* exponential backoff */
+		}
 	}
-	fclose(fp);
+
+	/* All retries exhausted */
+	current_mode = famfs_get_daxdev_mode(daxdev);
+	fprintf(stderr, "%s: failed after %d retries; expected %s but got %s\n",
+		__func__, max_retries,
+		(mode == DAXDEV_MODE_FAMFS) ? "fsdev_dax" : "device_dax",
+		(current_mode == DAXDEV_MODE_FAMFS) ? "fsdev_dax" :
+		(current_mode == DAXDEV_MODE_DEVICE_DAX) ? "device_dax" :
+		"unknown");
 
 out:
 	free(devname_copy);
 	return rc;
 }
-
-int famfs_bounce_daxdev(const char *name, int verbose)
-{
-	struct daxctl_ctx *ctx = NULL;
-	struct daxctl_dev *dev = NULL;
-	char *devname = strdup(name);
-	char *devbasename = basename(devname);
-	const char *realdevname;
-	int rc = 0;
-	(void)verbose;
-
-	rc = daxctl_new(&ctx);
-	if (rc) {
-		fprintf(stderr, "%s: daxctl_new() failed: %s\n",
-			__func__, strerror(-rc));
-		goto err_out;
-	}
-
-	dev = find_dax_by_name(ctx, devbasename);
-	if (!dev) {
-		fprintf(stderr, "%s: No such DAX device: %s\n",
-			__func__, devname);
-		rc = -ENODEV;
-		goto err_out;
-	}
-
-	/* Kinda circular, but correct */
-	realdevname = daxctl_dev_get_devname(dev);
-
-	/* Step 1: Disable (no-op if already disabled) */
-	rc = daxctl_dev_disable(dev);
-	if (rc) {
-		fprintf(stderr, "%s: failed to disable %s (errno=%d)\n",
-			__func__, realdevname, errno);
-		rc = -errno;
-		goto err_out;
-	}
-	printf("%s: disabled\n", realdevname);
-
-	/* Step 2: Enable in devdax mode */
-	rc = daxctl_dev_enable_devdax(dev);
-	if (rc) {
-		fprintf(stderr, "%s: dax_dev_enable(%s) failed (errno=%d)\n",
-			__func__, realdevname, errno);
-		rc = -errno;
-		goto err_out;
-	}
-
-	/* Optional: verify enabled */
-	if (!daxctl_dev_is_enabled(dev)) {
-		fprintf(stderr,
-			"%s: daxctl_dev_is_enabled(%s) errno=%d\n",
-			__func__, realdevname, errno);
-		rc = -1;
-		goto err_out;
-	}
-
-	printf("%s: re-enabled in devdax mode\n", realdevname);
-
-err_out:
-	if (ctx)
-		daxctl_unref(ctx);
-	free(devname);
-	return rc;
-}
-
-#ifdef STANDALONE
-int main(int argc, char **argv)
-{
-	if (argc != 2) {
-		fprintf(stderr, "Usage: %s daxX.Y | /dev/daxX.Y\n", argv[0]);
-		return 2;
-	}
-
-	arg_name = basename_dev(argv[1]);
-
-	return famfs_bounce_daxdev(arg_name);
-}
-#endif

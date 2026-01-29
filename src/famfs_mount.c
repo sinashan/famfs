@@ -25,6 +25,7 @@
 #include <sys/statfs.h>
 #include <sys/mount.h>
 #include <sys/mman.h>
+#include <sys/xattr.h>
 
 #include "famfs_lib_internal.h"
 
@@ -101,74 +102,50 @@ out:
 	return NULL;
 }
 
+#define FAMFS_XATTR_SHADOW "user.famfs.shadow"
+
 /**
- * shadow_path_from_opts()
+ * famfs_get_shadow_from_xattr() - Get shadow path from xattr
+ * @path: Any path within a famfs mount
+ * @shadow_out: Output buffer for shadow path
+ * @shadow_size: Size of shadow_out buffer
  *
- * Get shadow path from file system mount options (from the opts field in /proc/mounts)
+ * Retrieves the shadow path by reading the user.famfs.shadow extended
+ * attribute from the specified path. This works for FUSE-mounted famfs
+ * filesystems.
  *
- * @opts             - mount options from a famfs /proc/mounts entry
- * @shadow_path_out  - string to receive shadow path
- * @shadow_path_size - input - size of shadow_path_out string
- *
- * Returns: 0 if shadow path not found
- *          1 if shadow path found (and returned in shadow_path_out)
+ * Returns 0 on success, negative errno on failure.
  */
 static int
-shadow_path_from_opts(
-	const char *opts,
-	char *shadow_path_out,
-	size_t shadow_path_size)
+famfs_get_shadow_from_xattr(
+	const char *path,
+	char *shadow_out,
+	size_t shadow_size)
 {
-	const char *start;
-	const char *end;
-	const char *keyword = "shadow=";
-	size_t keyword_len = strlen(keyword);
+	ssize_t len;
 
-	if (opts == NULL || shadow_path_out == NULL || shadow_path_size == 0) {
-		return 0;  /* Invalid opts */
-	}
+	if (!path || !shadow_out || shadow_size == 0)
+		return -EINVAL;
 
-	start = end = opts;
+	len = getxattr(path, FAMFS_XATTR_SHADOW, shadow_out, shadow_size - 1);
+	if (len < 0)
+		return -errno;
 
-	while (*end != '\0') {
-		if (*end == ',' || *(end + 1) == '\0') {
-			/* Adjust end if it's the last character */
-			if (*(end + 1) == '\0')
-				end++;
-
-			/* Check if the segment starts with "shadow=" */
-			if ((end - start) >= (long int)keyword_len
-			    && strncmp(start, keyword, keyword_len) == 0) {
-				const char *value_start = start + keyword_len;
-				size_t value_length = end - value_start;
-
-				if (value_length >= shadow_path_size) {
-					return 0;  /* output buffer overflow */
-				}
-
-				strncpy(shadow_path_out, value_start, value_length);
-				shadow_path_out[value_length] = '\0';
-				return 1;  /* success */
-			}
-
-			/* Move to the next opt */
-			start = end + 1;
-		}
-		end++;
-	}
-
-	return 0;  /* No matching argument found */
+	/* Null-terminate the result */
+	shadow_out[len] = '\0';
+	return 0;
 }
 
 /* XXX: this function should be renamed more descriptively */
 /**
  * famfs_path_is_mount_pt()
  *
- * check whether a path is a famfs mount point via /proc/mounts
+ * Check whether a path is a famfs mount point via /proc/mounts.
+ * Shadow path is retrieved via the user.famfs.shadow xattr.
  *
- * @path:
+ * @path: path to check
  * @dev_out: if non-null, the device name will be copied here
- * @shadow_out:
+ * @shadow_out: if non-null, the shadow path will be copied here (via xattr)
  *
  * Return values
  * 1 - the path is an active famfs mount point
@@ -198,7 +175,6 @@ famfs_path_is_mount_pt(
 		char mpt[XLEN];
 		char fstype[XLEN];
 		char opts[XLEN] = { 0 };
-		char shadow_path[PATH_MAX];
 		int  x0, x1;
 		char *xmpt = NULL;
 		char *xpath = NULL;
@@ -214,10 +190,7 @@ famfs_path_is_mount_pt(
 				goto out;
 
 			/* check for famfs in the actual fstype field */
-			if (!strstr(fstype, "famfs") && !strstr(opts, "famfs") && !strstr(fstype, "fuse") && !strstr(opts, "shadow")) 
-				continue;
-
-			if (strlen(opts) <= strlen("shadow="))
+			if (!strstr(fstype, "famfs") && !strstr(opts, "famfs") && !strstr(fstype, "fuse"))
 				continue; 
 
 			xmpt = realpath(mpt, NULL);
@@ -244,12 +217,10 @@ famfs_path_is_mount_pt(
 			/* Path matches the mount point of this entry */
 
 			if (shadow_out) {
-				rc = shadow_path_from_opts(opts, shadow_path,
-							   sizeof(shadow_path));
-				if (rc)
-					strncpy(shadow_out, shadow_path,
-						PATH_MAX - 1);
-				else
+				rc = famfs_get_shadow_from_xattr(xpath,
+								shadow_out,
+								PATH_MAX);
+				if (rc != 0)
 					shadow_out[0] = 0;
 			}
 
@@ -276,7 +247,7 @@ out:
 }
 
 /**
- * Check all famfs-related /proc/mounts entries to see of @shadowpath is already
+ * Check all famfs-related /proc/mounts entries to see if @shadowpath is already
  * in use.
  *
  * Return 1 if in use, 0 if not
@@ -314,11 +285,11 @@ shadow_path_in_use(const char *shadowpath)
 			if (!strstr(fstype, "famfs"))
 				continue;
 
-			rc = shadow_path_from_opts(opts, entry_shadow,
-						   sizeof(entry_shadow));
-			if (!rc)  /* no shadow path in the current entry */
+			/* Get shadow path via xattr */
+			rc = famfs_get_shadow_from_xattr(mpt, entry_shadow,
+							sizeof(entry_shadow));
+			if (rc != 0)  /* no shadow path for this mount */
 				continue;
-
 
 			/* We must avoid overlapping shadow paths. This means that
 			 * the shorter path is a match for the fist n characters of
@@ -708,7 +679,6 @@ famfs_umount(const char *mpt)
  * @logplay_use_mmap
  * @useraccess
  * @default_perm
- * @bounce_dax       - Disable and re-enable daxdev before proceeding with mount
  * @dummy            - Perform a mount and create meta files but don't verify
  *                     superblock and log, and don't play the log.
  * @dummy_log_size   - Size of log file for dummy mount
@@ -724,12 +694,12 @@ famfs_mount_fuse(
 	int logplay_use_mmap,
 	int useraccess,
 	int default_perm,
-	int bounce_dax,
 	int dummy,
 	u64 dummy_log_size,
 	int debug,
 	int verbose)
 {
+	bool daxmode_required = famfs_daxmode_required();
 	u64 log_offset = FAMFS_SUPERBLOCK_SIZE;
 	char superblock_path[PATH_MAX] = {0};
 	struct famfs_superblock *sb = NULL;
@@ -810,13 +780,16 @@ famfs_mount_fuse(
 		goto out;
 	}
 
-	if (bounce_dax) {
-		/* Not more access allowed to the raw daxdev after mkmeta! */
-		rc = famfs_bounce_daxdev(realdaxdev, verbose);
+	if (daxmode_required) {
+	  	/* Put daxdev in famfs mode */
+		famfs_log(FAMFS_LOG_DEBUG, "%s: putting %s in famfs mode\n",
+			  __func__, realdaxdev);
+		rc = famfs_set_daxdev_mode(realdaxdev, DAXDEV_MODE_FAMFS,
+					   verbose);
 		if (rc) {
-			fprintf(stderr, "%s: failed to bounce daxdev %s\n",
+			fprintf(stderr, "%s: failed to set %s to famfs mode\n",
 				__func__, realdaxdev);
-			return rc;
+			return -ENODEV;
 		}
 	}
 
@@ -846,7 +819,7 @@ famfs_mount_fuse(
 	 */
 	if (check_file_exists(realmpt, ".meta/.superblock",
 			      1000 /* timeout */,
-			      FAMFS_SUPERBLOCK_SIZE, &sb_size, verbose + 1)) {
+			      FAMFS_SUPERBLOCK_SIZE, &sb_size, verbose)) {
 		fprintf(stderr, "%s: superblock file failed to appear\n",
 			__func__);
 		rc = -1;
@@ -988,9 +961,16 @@ famfs_dummy_mount(
 	size_t size;
 	int rc;
 
-	rc = famfs_get_device_size(realdaxdev, &size, 1 /* only char daxdevs */);
+	if (!mpt) {
+		fprintf(stderr, "%s: failed to create dummy mount point\n", __func__);
+		return -ENOMEM;
+	}
+
+	rc = famfs_get_device_size(realdaxdev, &size, 1 /* only char daxdevs */,
+				   verbose);
 	if (rc) {
 		fprintf(stderr, "%s: bad daxdev %s\n", __func__, realdaxdev);
+		free(mpt);
 		return rc;
 	}
 
@@ -998,7 +978,6 @@ famfs_dummy_mount(
 	rc = famfs_mount_fuse(realdaxdev, mpt, NULL, 100, 0,
 			      1 /* useraccess */,
 			      1 /* default_perm */,
-			      0 /* bounce_dax */,
 			      1 /* dummy */,
 			      log_size,
 			      debug, verbose);

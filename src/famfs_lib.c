@@ -413,7 +413,8 @@ int
 famfs_get_device_size(
 	const char       *fname,
 	size_t           *size,
-	bool              char_only)
+	bool              char_only,
+	int               verbose)
 {
 	char spath[PATH_MAX];
 	FILE *sfile;
@@ -449,7 +450,9 @@ famfs_get_device_size(
 		return -EINVAL;
 	}
 
-	printf("%s: getting daxdev size from file %s\n", __func__, spath);
+	if (verbose)
+		printf("%s: getting daxdev size from file %s\n",
+		       __func__, spath);
 	sfile = fopen(spath, "r");
 	if (!sfile) {
 		fprintf(stderr, "%s: fopen on %s failed (%s)\n",
@@ -470,7 +473,9 @@ famfs_get_device_size(
 	if (is_blk)
 		size_i *= 512; /* blkdev size is in 512b blocks */
 
-	printf("%s: size=%ld\n", __func__, size_i);
+	if (verbose)
+		printf("%s: size=%ld\n", __func__, size_i);
+
 	*size = (size_t)size_i;
 	return 0;
 }
@@ -1207,7 +1212,8 @@ __famfs_mkmeta_superblock(
 		close(sbfd);
 	}
 
-	printf("%s: Superblock file successfully created\n", __func__);
+	if (verbose)
+		printf("%s: Superblock file successfully created\n", __func__);
 	return 0;
 }
 
@@ -1322,7 +1328,9 @@ __famfs_mkmeta_log(
 		}
 		close(logfd);
 	}
-	printf("%s: Meta log file successfully created\n", __func__);
+
+	if (verbose)
+		printf("%s: Meta log file successfully created\n", __func__);
 	return 0;
 }
 
@@ -1465,11 +1473,15 @@ famfs_mmap_whole_file(
 		return NULL;
 	}
 	if (!ptr_is_readable(addr)) {
-		famfs_log(FAMFS_LOG_ERR, "%s: mmap(%s) not readable\n",
+		famfs_log(FAMFS_LOG_ERR, "%s: mmap(%s) not readable "
+			  "** Kernel and libfuse are likely incompatible! **\n",
 			  __func__, fname);
-		fprintf(stderr,  "%s: mmap(%s) not readable\n",
+		fprintf(stderr,  "%s: mmap(%s) not readable "
+			  "** Kernel and libfuse are likely incompatible! **\n",
 			__func__, fname);
 		addr = NULL;
+		/* Even though it wasn't readable, it was mapped... */
+		munmap(addr, st.st_size);
 	}
 	close(fd);
 	return addr;
@@ -2028,7 +2040,7 @@ famfs_dax_shadow_logplay(
 	/* daxmode_required implies that raw dax access doesn't work;
 	 * Do a dummy mount for access
 	 */
-	rc = famfs_set_daxdev_mode(daxdev, DAXDEV_MODE_FAMFS);
+	rc = famfs_set_daxdev_mode(daxdev, DAXDEV_MODE_FAMFS, verbose);
 	if (rc) {
 		fprintf(stderr, "%s: failed to set %s to famfs mode\n",
 			__func__, daxdev);
@@ -2084,6 +2096,7 @@ out_umount:
 
 		free(mpt_out);
 	}
+	free(realdaxdev);
 	return rc;
 }
 
@@ -2968,12 +2981,13 @@ out:
 }
 
 /**
- * famfs_fsck_mounted()
+ * famfs_fsck()
  *
  * Fsck a famfs file system. 
  *
  * @path       - This can be the daxdev
  *               or any path within the mounted famfs file system
+ * @nodax      - Avoid raw dax access
  * @use_mmap   - if true, mmap the sb/log files; if false, read into buffers
  * @human      - human readable output
  * @nbuckets   - number of buckets for histogram
@@ -3020,23 +3034,10 @@ famfs_fsck(
 	case S_IFBLK: /* fallthrough (allow block/pmem)*/
 	case S_IFCHR: {
 		char *mpt;
-		
+
+		/* daxmode_required means the famfs mode of dax is required */
 		daxmode_required = famfs_daxmode_required();
 		initial_daxmode = famfs_get_daxdev_mode(path);
-		if (initial_daxmode == DAXDEV_MODE_UNKNOWN) {
-			fprintf(stderr, "%s: bad mode for daxdev %s\n",
-				__func__, path);
-			return -ENXIO;
-		}
-		if (daxmode_required) {
-			rc = famfs_set_daxdev_mode(path, DAXDEV_MODE_FAMFS);
-			if (rc) {
-				fprintf(stderr,
-					"%s: failed to set %s to famfs mode\n",
-					__func__, path);
-				return -ENODEV;
-			}
-		}
 
 		/* Check if there is a mounted famfs file system on this device;
 		 * fail if so - if mounted, have to fsck by mount pt
@@ -3059,7 +3060,7 @@ famfs_fsck(
 			 */
 			rc = famfs_dummy_mount(path,
 					       0 /* figure out log size */,
-					       &dummy_mpt, 0, 0);
+					       &dummy_mpt, 0, verbose);
 			if (rc) {
 				fprintf(stderr,
 					"%s: dummy mount failed for %s\n",
@@ -3113,11 +3114,12 @@ out_umount:
 			printf("%s: umount successful for %s\n",
 			       __func__, dummy_mpt);
 		}
+		free(dummy_mpt);
 	}
 	if (daxmode_required && initial_daxmode != DAXDEV_MODE_FAMFS) {
 		int xrc;
 
-		xrc = famfs_set_daxdev_mode(path, initial_daxmode);
+		xrc = famfs_set_daxdev_mode(path, initial_daxmode, verbose);
 		if (xrc) {
 			fprintf(stderr,
 				"%s: failed to reset %s to original mode\n",
@@ -5477,7 +5479,7 @@ static bool famfs_mkfs_allowed(
 			__func__, daxdev);
 		return false;
 	}
-	rc = famfs_get_device_size(daxdev, &devsize, 1);
+	rc = famfs_get_device_size(daxdev, &devsize, 1, 0);
 	if (rc)
 		return false;
 
@@ -5495,9 +5497,10 @@ static bool famfs_mkfs_allowed(
 static int
 famfs_mkfs_via_dummy_mount(
 	const char *daxdev,
-	u64         log_len,
+	u64         log_len, /* already validated */
 	int         kill,
-	int         force)
+	int         force,
+	int         verbose)
 {
 	struct famfs_superblock *sb = NULL;
 	struct famfs_log *logp = NULL;
@@ -5509,16 +5512,9 @@ famfs_mkfs_via_dummy_mount(
 
 	/* This will be checked again, but it's a valid way to check whether
 	 * daxdev is actually a dax device */
-	rc = famfs_get_device_size(daxdev, &devsize_out, 1);
+	rc = famfs_get_device_size(daxdev, &devsize_out, 1, verbose);
 	if (rc)
 		return rc;
-
-	/* Minimum log length is the FAMFS_LOG_LEN; And must be a power of 2 */
-	if (log_len & (log_len - 1) || log_len < FAMFS_LOG_LEN) {
-		fprintf(stderr, "%s: Error: invalid log length (%lld)\n",
-			__func__, log_len);
-		return -EINVAL;
-	}
 
 	rc = famfs_dummy_mount(daxdev, log_len, &mpt_out, 0, 0);
 	if (rc) {
@@ -5614,13 +5610,14 @@ out_umount:
 			"%s: %d umount failed for %s (errno=%d)\n",
 			__func__, getpid(), mpt_out, errno);
 	}
+	free(mpt_out);
 	return rc;
 }
 
 int
 famfs_mkfs_rawdev(
 	const char *daxdev,
-	u64         log_len,
+	u64         log_len, /* already validated */
 	int         kill,
 	int         force)
 {
@@ -5630,13 +5627,6 @@ famfs_mkfs_rawdev(
 	size_t devsize_out;
 	char *mpt = NULL;
 	int rc;
-
-	/* Minimum log length is the FAMFS_LOG_LEN; And must be a power of 2 */
-	if (log_len & (log_len - 1) || log_len < FAMFS_LOG_LEN) {
-		fprintf(stderr, "%s: Error: invalid log length (%lld)\n",
-			__func__, log_len);
-		return -EINVAL;
-	}
 
 	mpt = famfs_get_mpt_by_dev(daxdev);
 	if (mpt) {
@@ -5691,31 +5681,23 @@ famfs_mkfs(
 	u64         log_len,
 	int         kill,
 	bool        nodax_in,
-	int         force)
+	int         force,
+	int         verbose)
 {
 	bool daxmode_required = famfs_daxmode_required();
 	bool no_raw_dax = nodax_in || daxmode_required;;
-	enum famfs_daxdev_mode initial_daxmode;
 	int rc;
 
-	initial_daxmode = famfs_get_daxdev_mode(daxdev);
-	if (initial_daxmode == DAXDEV_MODE_UNKNOWN) {
-		fprintf(stderr, "%s: bad mode for daxdev %s\n",
-			__func__, daxdev);
-		return -ENXIO;
-	}
-
-	if (daxmode_required) {
-		rc = famfs_set_daxdev_mode(daxdev, DAXDEV_MODE_FAMFS);
-		if (rc) {
-			fprintf(stderr, "%s: failed to set %s to famfs mode\n",
-				__func__, daxdev);
-			return -ENODEV;
-		}
+	/* Minimum log length is the FAMFS_LOG_LEN; And must be a power of 2 */
+	if (log_len & (log_len - 1) || log_len < FAMFS_LOG_LEN) {
+		fprintf(stderr, "%s: Error: invalid log length (%lld)\n",
+			__func__, log_len);
+		return -EINVAL;
 	}
 
 	if (no_raw_dax)
-		rc = famfs_mkfs_via_dummy_mount(daxdev, log_len, kill, force);
+		rc = famfs_mkfs_via_dummy_mount(daxdev, log_len, kill, force,
+						verbose);
 	else
 		rc = famfs_mkfs_rawdev(daxdev, log_len, kill, force);
 
@@ -5723,9 +5705,6 @@ famfs_mkfs(
 	/* If we changed the daxmode, and we did NOT mkfs successfully,
 	 * put the daxdev back the way we found it
 	 */
-	if (rc && initial_daxmode != DAXDEV_MODE_FAMFS)
-		famfs_set_daxdev_mode(daxdev, initial_daxmode);
-
 	return rc;
 }
 

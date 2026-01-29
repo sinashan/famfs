@@ -100,7 +100,6 @@ do_famfs_cli_logplay(int argc, char *argv[])
 	int shadowtest = 0;
 	int client_mode = 0;
 	char *daxdev = NULL;
-	extern int mock_fstype;
 	char *shadowpath = NULL;
 
 	struct option logplay_options[] = {
@@ -116,7 +115,6 @@ do_famfs_cli_logplay(int argc, char *argv[])
 		{"shadowtest", no_argument,            0,  's'},
 		{"shadow",    required_argument,       0,  'S'},
 		{"daxdev",    required_argument,       0,  'd'},
-		{"mock",      no_argument,             0,  'M'},
 		{0, 0, 0, 0}
 	};
 
@@ -166,9 +164,6 @@ do_famfs_cli_logplay(int argc, char *argv[])
 			break;
 		case 'd':
 			daxdev = optarg;
-			break;
-		case 'M':
-			mock_fstype = FAMFS_V1;
 			break;
 		}
 	}
@@ -249,8 +244,6 @@ famfs_mount_usage(int   argc,
 	       "    -p|--nodefaultperm - Do not apply normal posix permissions\n"
 	       "                         (don't use fuse default_permissions mount opt)\n"
 	       "    -S|--shadow=path   - Path to root of shadow filesystem\n"
-	       "    -b|--bouncedax     - Disable and re-enable the primary daxdev prior to mount\n"
-	       "                         (fuse only)\n"
 	       "\n", progname);
 }
 
@@ -263,19 +256,18 @@ do_famfs_cli_mount(int argc, char *argv[])
 	int debug = 0;
 	int verbose = 0;
 	int use_read = 0;
-	int bouncedax = 0;
 	int useraccess = 1;
 	int default_perm = 1;
 	char *shadowpath = NULL;
 	int use_mmap = 0;
 	char *mpt = NULL;
-	int fuse_mode = 0;
 	int remaining_args;
 	char *daxdev = NULL;
 	char *realmpt = NULL;
 	ssize_t timeout = -1;
 	char *cachearg = NULL;
 	char *realdaxdev = NULL;
+	enum famfs_type fuse_mode = NOT_FAMFS;
 	const char *famfs_mode = getenv("FAMFS_MODE");
 	unsigned long mflags = MS_NOATIME | MS_NOSUID | MS_NOEXEC | MS_NODEV;
 
@@ -290,7 +282,6 @@ do_famfs_cli_mount(int argc, char *argv[])
 		{"verbose",    no_argument,            0,  'v'},
 		{"nouseraccess", no_argument,          0,  'u'},
 		{"nodefaultperm", no_argument,         0,  'p'},
-		{"bouncedax",   no_argument,           0,  'b'},
 		{"shadow",     required_argument,      0,  'S'},
 		{"dummy",      no_argument,            0,  'D'},
 
@@ -364,7 +355,6 @@ do_famfs_cli_mount(int argc, char *argv[])
 			cachearg = optarg;
 			break;
 		case 'D':
-			printf("dummy = 1\n");
 			dummy = 1;
 			break;
 		}
@@ -465,7 +455,7 @@ do_famfs_cli_mount(int argc, char *argv[])
 		printf("daxdev=%s, mpt=%s\n", realdaxdev, realmpt);
 		rc = famfs_mount_fuse(realdaxdev, realmpt, shadowpath,
 				      timeout, use_mmap, useraccess,
-				      default_perm, bouncedax,
+				      default_perm,
 				      0, 0, /* not dummy mount */
 				      debug, verbose);
 		goto out;
@@ -499,15 +489,6 @@ do_famfs_cli_mount(int argc, char *argv[])
 			"famfs mount: failed to validate famfs file system\n");
 		rc = -1;
 		goto err_out;
-	}
-
-	if (bouncedax) {
-		rc = famfs_bounce_daxdev(realdaxdev, verbose);
-		if (rc) {
-			fprintf(stderr, "%s: failed to bounce daxdev %s\n",
-				__func__, realdaxdev);
-			return rc;
-		}
 	}
 
 	rc = mount(realdaxdev, realmpt, "famfs", mflags, "");
@@ -667,7 +648,6 @@ int
 do_famfs_cli_fsck(int argc, char *argv[])
 {
 	int c;
-	extern int mock_fstype;
 	char *daxdev = NULL;
 	bool nodax = false;
 	int nbuckets = 0;
@@ -685,7 +665,6 @@ do_famfs_cli_fsck(int argc, char *argv[])
 		/* Un-publicized options */
 		{"mmap",        no_argument,             0,  'm'},
 		{"read",        no_argument,             0,  'r'},
-		{"mock",        no_argument,             0,  'M'},
 		{"nodax",       no_argument,             0,  'D'},
 
 		{0, 0, 0, 0}
@@ -714,9 +693,6 @@ do_famfs_cli_fsck(int argc, char *argv[])
 			break;
 		case 'v':
 			verbose++;
-			break;
-		case 'M':
-			mock_fstype = FAMFS_V1;
 			break;
 		case 'B':
 			nbuckets = strtoul(optarg, 0, 0);
@@ -1758,7 +1734,7 @@ do_famfs_cli_creat(int argc, char *argv[])
 			if (!mc)
 				mc = calloc(argc, sizeof(*mc));
 
-			strings = tokenize_string(optarg, ",", &nstrings);
+			strings = tokenize_string(optarg, ',', &nstrings);
 			if (!nstrings || nstrings < 2 || nstrings > 3) {
 				free_string_list(strings, nstrings);
 				fprintf(stderr,
@@ -2148,7 +2124,7 @@ do_famfs_cli_verify(int argc, char *argv[])
 			if (!mv)
 				mv = calloc(argc, sizeof(*mv));
 
-			strings = tokenize_string(optarg, ",", &nstrings);
+			strings = tokenize_string(optarg, ',', &nstrings);
 			if (nstrings !=2) {
 				free_string_list(strings, nstrings);
 				fprintf(stderr,

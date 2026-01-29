@@ -82,7 +82,7 @@ while (( $# > 0)); do
 	    SKIP_TEST4=1
 	    #SKIP_PCQ=1
 	    #SKIP_FIO=1
-	    #SKIP_SHADOW_YAML=1
+	    SKIP_SHADOW_YAML=1
 	    SKIP_STRIPE_TEST=1
 	    COVERAGE=0
 	    ;;
@@ -127,10 +127,13 @@ while (( $# > 0)); do
 	    BIN="$CWD/coverage"
 	    echo "hello coverage BIN=$BIN"
 	    ;;
+	(--with-pcq)
+	    FORCE_PCQ=1
+	    ;;
 	(-s|--sanitize)
 	    COVERAGE=1
 	    BIN="$CWD/sanitize"
-	    echo "hello coverage BIN=$BIN"
+	    echo "hello sanitize BIN=$BIN"
 	    ;;
 	(-v|--valgrind)
 	    echo "run_smoke: valgrind mode"
@@ -229,11 +232,11 @@ fi
 # Figure out the module name(s)
 V1PATH="/lib/modules/$(uname -r)/kernel/fs/famfs"
 if [ -f "${V1PATH}/famfs.ko" ]; then
-    MOD_ARG="--module famfs"
+    MOD_ARG=("--module" "famfs")
 elif [ -f "${V1PATH}/famfsv1.ko" ]; then
-    MOD_ARG="--module famfsv1"
+    MOD_ARG=("--module" "famfsv1")
 else
-    MOD_ARG=""
+    MOD_ARG=()
 fi
 
 id=$(id -un)
@@ -246,58 +249,105 @@ if [[ "$SCRIPTS" =~ *[[:space:]]* ]]; then
     fail "ERROR: the SCRIPTS path ($SCRIPTS) contains spaces!"
 fi
 
-./smoke/prepare.sh  ${MOD_ARG} $VGARG -b "$BIN" -s "$SCRIPTS" -d $DEV  -m "$FAMFS_MODE" $NODAX_ARG $LOG_ARG || exit -1
-echo ":== prepare success"
+# Build common arguments array for smoke test scripts
+SMOKE_ARGS=(-b "$BIN" -s "$SCRIPTS" -d "$DEV" -m "$FAMFS_MODE")
+[[ ${#MOD_ARG[@]} -gt 0 ]] && SMOKE_ARGS+=("${MOD_ARG[@]}")
+[[ -n "$VGARG" ]] && SMOKE_ARGS+=("$VGARG")
+[[ -n "$NODAX_ARG" ]] && SMOKE_ARGS+=("$NODAX_ARG")
+[[ -n "$LOG_ARG" ]] && SMOKE_ARGS+=("$LOG_ARG")
+[[ "$COVERAGE" -eq 1 ]] && SMOKE_ARGS+=("--coverage")
+
+# Arrays to track test timing
+declare -a TEST_NAMES=()
+declare -a TEST_TIMES=()
+SMOKE_START_TIME=$(date +%s)
+
+# Format seconds as MM:SS
+format_time() {
+    local secs=$1
+    printf "%d:%02d" $((secs / 60)) $((secs % 60))
+}
+
+start_time=$(date +%s)
+./smoke/prepare.sh "${SMOKE_ARGS[@]}" || exit -1
+elapsed=$(($(date +%s) - start_time))
+TEST_NAMES+=("prepare")
+TEST_TIMES+=("$elapsed")
+echo ":== prepare success ($(format_time $elapsed))"
 
 if [ -z "$SKIP_TEST0" ]; then
-    ./smoke/test0.sh ${MOD_ARG} $VGARG -b "$BIN" -s "$SCRIPTS" -d $DEV  -m "$FAMFS_MODE" $NODAX_ARG $LOG_ARG || exit -1
+    start_time=$(date +%s)
+    ./smoke/test0.sh "${SMOKE_ARGS[@]}" || exit -1
     sudo chown -R ${id}:${grp} $BIN # fixup permissions for gcov
-    echo ":== test0 success"
+    elapsed=$(($(date +%s) - start_time))
+    TEST_NAMES+=("test0")
+    TEST_TIMES+=("$elapsed")
+    echo ":== test0 success ($(format_time $elapsed))"
     sleep "${SLEEP_TIME}"
 else
     echo ":== skipped test0 due to run_smoke options"
 fi
 
 if [ -z "$SKIP_SHADOW_YAML" ]; then
-    ./smoke/test_shadow_yaml.sh ${MOD_ARG} $VGARG -b "$BIN" -s "$SCRIPTS" -d $DEV  -m "$FAMFS_MODE" $NODAX_ARG $LOG_ARG || exit -1
+    start_time=$(date +%s)
+    ./smoke/test_shadow_yaml.sh "${SMOKE_ARGS[@]}" || exit -1
     sudo chown -R ${id}:${grp} $BIN # fixup permissions for gcov
-    echo ":== test_shadow_yaml success"
+    elapsed=$(($(date +%s) - start_time))
+    TEST_NAMES+=("test_shadow_yaml")
+    TEST_TIMES+=("$elapsed")
+    echo ":== test_shadow_yaml success ($(format_time $elapsed))"
     sleep "${SLEEP_TIME}"
 else
     echo ":== skipped test_shadow_yaml due to run_smoke options"
 fi
 
 if [ -z "$SKIP_TEST1" ]; then
-    sudo ./smoke/test1.sh ${MOD_ARG} $VGARG -b "$BIN" -s "$SCRIPTS" -d $DEV  -m "$FAMFS_MODE" $NODAX_ARG $LOG_ARG || exit -1
+    start_time=$(date +%s)
+    sudo ./smoke/test1.sh "${SMOKE_ARGS[@]}" || exit -1
     sudo chown -R ${id}:${grp} $BIN # fixup permissions for gcov
-    echo ":== test1 success"
+    elapsed=$(($(date +%s) - start_time))
+    TEST_NAMES+=("test1")
+    TEST_TIMES+=("$elapsed")
+    echo ":== test1 success ($(format_time $elapsed))"
     sleep "${SLEEP_TIME}"
 else
     echo ":== skipped test1 due to run_smoke options"
 fi
 
 if [ -z "$SKIP_TEST2" ]; then
-    ./smoke/test2.sh ${MOD_ARG} $VGARG -b "$BIN" -s "$SCRIPTS" -d $DEV  -m "$FAMFS_MODE" $NODAX_ARG $LOG_ARG || exit -1
+    start_time=$(date +%s)
+    ./smoke/test2.sh "${SMOKE_ARGS[@]}" || exit -1
     sudo chown -R ${id}:${grp} $BIN # fixup permissions for gcov
-    echo ":== test2 success"
+    elapsed=$(($(date +%s) - start_time))
+    TEST_NAMES+=("test2")
+    TEST_TIMES+=("$elapsed")
+    echo ":== test2 success ($(format_time $elapsed))"
     sleep "${SLEEP_TIME}"
 else
     echo ":== skipped test2 due to run_smoke options"
 fi
 
 if [ -z "$SKIP_TEST3" ]; then
-    ./smoke/test3.sh ${MOD_ARG} $VGARG -b "$BIN" -s "$SCRIPTS" -d $DEV  -m "$FAMFS_MODE" $NODAX_ARG $LOG_ARG || exit -1
+    start_time=$(date +%s)
+    ./smoke/test3.sh "${SMOKE_ARGS[@]}" || exit -1
     sudo chown -R ${id}:${grp} $BIN # fixup permissions for gcov
-    echo ":== test3 success"
+    elapsed=$(($(date +%s) - start_time))
+    TEST_NAMES+=("test3")
+    TEST_TIMES+=("$elapsed")
+    echo ":== test3 success ($(format_time $elapsed))"
     sleep "${SLEEP_TIME}"
 else
     echo ":== skipped test3 due to run_smoke options"
 fi
 
 if [ -z "$SKIP_TEST4" ]; then
-    ./smoke/test4.sh ${MOD_ARG} $VGARG -b "$BIN" -s "$SCRIPTS" -d $DEV  -m "$FAMFS_MODE" $NODAX_ARG $LOG_ARG || exit -1
+    start_time=$(date +%s)
+    ./smoke/test4.sh "${SMOKE_ARGS[@]}" || exit -1
     sudo chown -R ${id}:${grp} $BIN # fixup permissions for gcov
-    echo ":== test4 success"
+    elapsed=$(($(date +%s) - start_time))
+    TEST_NAMES+=("test4")
+    TEST_TIMES+=("$elapsed")
+    echo ":== test4 success ($(format_time $elapsed))"
     sleep "${SLEEP_TIME}"
 else
     echo ":== skipped test4 due to run_smoke options"
@@ -305,17 +355,25 @@ fi
 
 if [ -z "$SKIP_ERRS" ]; then
     sleep "${SLEEP_TIME}"
-    ./smoke/test_errors.sh ${MOD_ARG} $VGARG -b "$BIN" -s "$SCRIPTS" -d $DEV  -m "$FAMFS_MODE" $NODAX_ARG $LOG_ARG || exit -1
-    echo ":== test_errs success"
+    start_time=$(date +%s)
+    ./smoke/test_errors.sh "${SMOKE_ARGS[@]}" || exit -1
     sudo chown -R ${id}:${grp} $BIN # fixup permissions for gcov
+    elapsed=$(($(date +%s) - start_time))
+    TEST_NAMES+=("test_errors")
+    TEST_TIMES+=("$elapsed")
+    echo ":== test_errors success ($(format_time $elapsed))"
 else
     echo ":== skipping test_errors.sh because -n|--noerrors was specified"
 fi
 
 if [ -z "$SKIP_STRIPE_TEST" ] && [ -z "$KABI_42"  ]; then
-    ./smoke/stripe_test.sh ${MOD_ARG} $VGARG -b "$BIN" -s "$SCRIPTS" -d $DEV  -m "$FAMFS_MODE" $NODAX_ARG $LOG_ARG || exit -1
+    start_time=$(date +%s)
+    ./smoke/stripe_test.sh "${SMOKE_ARGS[@]}" || exit -1
     sudo chown -R ${id}:${grp} $BIN # fixup permissions for gcov
-    echo ":== stripe_test success"
+    elapsed=$(($(date +%s) - start_time))
+    TEST_NAMES+=("stripe_test")
+    TEST_TIMES+=("$elapsed")
+    echo ":== stripe_test success ($(format_time $elapsed))"
     sleep "${SLEEP_TIME}"
 else
     if [ -z "$KABI_42" ]; then
@@ -325,26 +383,32 @@ else
     fi
 fi
 
-if [[ $COVERAGE -ne 1 ]]; then
+if [[ $COVERAGE -ne 1 ]] || [[ -n "$FORCE_PCQ" ]]; then
     if [ -z "$SKIP_PCQ" ]; then
 	# XXX: get test_pcq running properly in coverage test mode
-	./smoke/test_pcq.sh ${MOD_ARG} $VGARG \
-			    -b "$BIN" -s "$SCRIPTS" -d $DEV  -m "$FAMFS_MODE" \
-	    $NODAX_ARG $LOG_ARG || exit -1
-	echo ":== test_pcq success"
+	start_time=$(date +%s)
+	./smoke/test_pcq.sh "${SMOKE_ARGS[@]}" || exit -1
 	sudo chown -R ${id}:${grp} $BIN # fixup permissions for gcov
+	elapsed=$(($(date +%s) - start_time))
+	TEST_NAMES+=("test_pcq")
+	TEST_TIMES+=("$elapsed")
+	echo ":== test_pcq success ($(format_time $elapsed))"
 	sleep "${SLEEP_TIME}"
     else
-	echo ":== skipped test_pcq doe to run_smoke options"
+	echo ":== skipped test_pcq due to run_smoke options"
     fi
 else
-    echo ":== Skipped test_pcq due to coverage test (it's slow)"	
+    echo ":== Skipped test_pcq due to coverage test (use --with-pcq to override)"
 fi
 
 if [ -z "$SKIP_FIO" ]; then
-    ./smoke/test_fio.sh ${MOD_ARG} $VGARG -b "$BIN" -s "$SCRIPTS" -d $DEV  -m "$FAMFS_MODE" $NODAX_ARG $LOG_ARG || exit -1
-    echo ":== test_fio success"
+    start_time=$(date +%s)
+    ./smoke/test_fio.sh "${SMOKE_ARGS[@]}" || exit -1
     sudo chown -R ${id}:${grp} $BIN # fixup permissions for gcov
+    elapsed=$(($(date +%s) - start_time))
+    TEST_NAMES+=("test_fio")
+    TEST_TIMES+=("$elapsed")
+    echo ":== test_fio success ($(format_time $elapsed))"
     sleep "${SLEEP_TIME}"
 else
     echo ":== skipped test_fio due to run_smoke options"
@@ -353,6 +417,17 @@ fi
 sudo umount $MPT
 
 set +x
+SMOKE_END_TIME=$(date +%s)
+SMOKE_TOTAL=$((SMOKE_END_TIME - SMOKE_START_TIME))
+
+echo ":==-------------------------------------------------------------------"
+echo ":== Test Timing Summary"
+echo ":==-------------------------------------------------------------------"
+for i in "${!TEST_NAMES[@]}"; do
+    printf ":==  %-20s %s\n" "${TEST_NAMES[$i]}" "$(format_time ${TEST_TIMES[$i]})"
+done
+echo ":==-------------------------------------------------------------------"
+printf ":==  %-20s %s\n" "TOTAL" "$(format_time $SMOKE_TOTAL)"
 echo ":==-------------------------------------------------------------------"
 echo ":==run_smoke completed successfully ($(date))"
 echo ":==-------------------------------------------------------------------"

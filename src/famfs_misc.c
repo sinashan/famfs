@@ -404,7 +404,7 @@ enum famfs_type
 famfs_get_kernel_type(int verbose)
 {
 	/* First choice is fuse */
-	if (kernel_symbol_exists("fuse_file_famfs", "fuse", verbose))
+	if (kernel_symbol_exists("famfs_fuse_iomap_begin", "fuse", verbose))
 		return FAMFS_FUSE;
 
 	if (kernel_symbol_exists("famfs_create", "famfsv1", verbose))
@@ -511,8 +511,8 @@ int check_file_exists(
 						expected_size);
 					goto retry;
 				}
-
-				printf("%s: good size\n", __func__);
+				if (verbose)
+					printf("%s: good size\n", __func__);
 
 				if (size_out)
 					*size_out = st.st_size;
@@ -564,14 +564,16 @@ void free_string_list(char **strings, int nstrings)
 }
 
 /*
- * Splits a comma-separated string (no whitespace) into an array of strings.
+ * Splits a delimited string (no whitespace) into an array of strings.
  * - input: input string to split
+ * - delimiter: single character delimiter
  * - out_count: receives the number of tokens
  * Returns: array of strings (char **), or NULL on failure.
  * Caller must free each string and the array itself.
  */
-char **tokenize_string(const char *input, const char *delimiter, int *out_count)
+char **tokenize_string(const char *input, char delimiter, int *out_count)
 {
+	char delim_str[2] = {delimiter, '\0'};
 	char *copy;
 	char *token;
 	char **result;
@@ -580,8 +582,6 @@ char **tokenize_string(const char *input, const char *delimiter, int *out_count)
 	int i = 0;
 	int j;
 
-	assert(strlen(delimiter) == 1);
-
 	if (input == NULL || out_count == NULL)
 		return NULL;
 
@@ -589,10 +589,10 @@ char **tokenize_string(const char *input, const char *delimiter, int *out_count)
 	if (copy == NULL)
 		return NULL;
 
-	/* get a comma-count */
+	/* count delimiters to determine array size */
 	count = 1;
 	for (p = input; *p != '\0'; ++p) {
-		if (*p == ',')
+		if (*p == delimiter)
 			count++;
 	}
 
@@ -602,7 +602,7 @@ char **tokenize_string(const char *input, const char *delimiter, int *out_count)
 		return NULL;
 	}
 
-	token = strtok(copy, delimiter);
+	token = strtok(copy, delim_str);
 	while (token != NULL && i < count) {
 		result[i] = strdup(token);
 		if (result[i] == NULL) {
@@ -613,7 +613,7 @@ char **tokenize_string(const char *input, const char *delimiter, int *out_count)
 			return NULL;
 		}
 		i++;
-		token = strtok(NULL, delimiter);
+		token = strtok(NULL, delim_str);
 	}
 
 	free(copy);
@@ -730,4 +730,35 @@ int exit_val(int rc) {
 	} else {
 		return 127;
 	}
+}
+
+void *
+famfs_read_fd_to_buf(int fd, ssize_t max_size, ssize_t *size_out)
+{
+	char *buf;
+	ssize_t n;
+
+	if (max_size > FAMFS_YAML_MAX)
+		famfs_log(FAMFS_LOG_ERR, "%s: max_size=%lld > limit=%d\n",
+			 __func__, max_size, FAMFS_YAML_MAX);
+
+	buf = calloc(1, max_size + 8);
+	if (!buf) {
+		famfs_log(FAMFS_LOG_ERR, "%s: failed to malloc(%ld)\n",
+			 __func__, max_size);
+		return NULL;
+	}
+
+	n = pread(fd, buf, max_size, 0);
+	if (n < 0) {
+		famfs_log(FAMFS_LOG_ERR,
+		       "%s: failed to read max_size=%ld from fd(%d) errno %d\n",
+			 __func__, max_size, fd, errno);
+		free(buf);
+		*size_out = 0;
+		return NULL;
+	}
+	*size_out = n;
+
+	return buf;
 }

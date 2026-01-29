@@ -53,10 +53,12 @@ while (( $# > 0)); do
 	    echo "Using release BIN=$BIN"
 	    ;;
 	(-c|--coverage)
+	    COVERAGE=1
 	    BIN="$CWD/coverage"
 	    echo "Using coverage BIN=$BIN"
 	    ;;
 	(-s|--sanitize)
+	    COVERAGE=1
 	    BIN="$CWD/sanitize"
 	    echo "Using sanitize BIN=$BIN"
 	    ;;
@@ -118,11 +120,11 @@ fi
 # Figure out the module name(s)
 V1PATH="/lib/modules/$(uname -r)/kernel/fs/famfs"
 if [ -f "${V1PATH}/famfs.ko" ]; then
-    MOD_ARG="--module famfs"
+    MOD_ARG=("--module" "famfs")
 elif [ -f "${V1PATH}/famfsv1.ko" ]; then
-    MOD_ARG="--module famfsv1"
+    MOD_ARG=("--module" "famfsv1")
 else
-    MOD_ARG=""
+    MOD_ARG=()
 fi
 
 id=$(id -un)
@@ -158,10 +160,16 @@ else
     exit -1
 fi
 
+# Build common arguments array
+SNIFF_ARGS=(-b "$BIN" -s "$SCRIPTS" -d "$DEV" -m "$FAMFS_MODE" -H sniff)
+[[ ${#MOD_ARG[@]} -gt 0 ]] && SNIFF_ARGS+=("${MOD_ARG[@]}")
+[[ -n "$VGARG" ]] && SNIFF_ARGS+=("$VGARG")
+[[ -n "$NODAX_ARG" ]] && SNIFF_ARGS+=("$NODAX_ARG")
+[[ -n "$LOG_ARG" ]] && SNIFF_ARGS+=("$LOG_ARG")
+[[ "$COVERAGE" -eq 1 ]] && SNIFF_ARGS+=("--coverage")
+
 # Run prepare.sh to clean up
-./smoke/prepare.sh -H sniff \
-		   ${MOD_ARG} $VGARG -b "$BIN" -s "$SCRIPTS" -d $DEV \
-		   -m "$FAMFS_MODE" $NODAX_ARG $LOG_ARG --harness sniff|| exit -1
+./smoke/prepare.sh "${SNIFF_ARGS[@]}" || exit -1
 echo ":== prepare success"
 
 # Now run the actual sniff test
