@@ -269,7 +269,8 @@ do_famfs_cli_mount(int argc, char *argv[])
 	char *realdaxdev = NULL;
 	enum famfs_type fuse_mode = NOT_FAMFS;
 	const char *famfs_mode = getenv("FAMFS_MODE");
-	unsigned long mflags = MS_NOATIME | MS_NOSUID | MS_NOEXEC | MS_NODEV;
+	// unsigned long mflags = MS_NOATIME | MS_NOSUID | MS_NOEXEC | MS_NODEV;
+	unsigned long mflags = MS_NOATIME | MS_NODEV;
 
 	struct option mount_options[] = {
 		/* These options set a */

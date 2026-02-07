@@ -4323,143 +4323,140 @@ struct copy_data {
 static int
 __famfs_copy_file_data(struct copy_data *cp)
 {
-	size_t chunksize, remainder, offset;
-	char *readbuf = NULL;
-	pid_t pid = gettid();
-	int cleanup = 0;
-	ssize_t bytes;
-	char *destp;
-	int rc = 0;
-	int i;
+    size_t chunksize, remainder, offset;
+    char *readbuf = NULL;
+    pid_t pid = gettid();
+    int cleanup = 0;
+    ssize_t bytes;
+    char *destp;
+    int rc = 0;
+    int i;
+    int local_srcfd = -1;  /* Local file descriptor for this thread only */
 
-	assert(cp);
-	assert(cp->cf);
+    assert(cp);
+    assert(cp->cf);
 
-	if (cp->cf->srcfd > 0 && cp->cf->destfd > 0)
-		goto files_are_open;
+    /*
+     * Each thread opens its own source file descriptor to avoid
+     * file descriptor exhaustion when copying many files.
+     * The FD is closed at the end of this function.
+     */
+    local_srcfd = open(cp->cf->srcname, O_RDONLY, 0);
+    if (local_srcfd < 0) {
+        fprintf(stderr, "%s: failed to open source file %s (errno=%d)\n",
+            __func__, cp->cf->srcname, errno);
+        rc = -1;
+        goto out;
+    }
 
-	/* If this is the first thread to work on this file pair, the files
-	 * will not be open yet. Take care of that...
-	 */
-	pthread_mutex_lock(&cp->cf->mutex);
-	if (!cp->cf->srcfd) {
-		cp->cf->srcfd = open(cp->cf->srcname, O_RDONLY, 0);
-		if (cp->cf->srcfd < 0) {
-			fprintf(stderr, "%s: failed to open source file %s\n",
-				__func__, cp->cf->srcname);
-			/* XXX post the error somehow? */
-			goto out_locked;
-		}
-	}
-	pthread_mutex_unlock(&cp->cf->mutex);
+    /* Copy the data */
+    chunksize = 0x100000; /* 1 MiB copy chunks */
+    offset = cp->offset;
+    remainder = cp->size;
+    destp = cp->cf->destp;
 
-files_are_open:
-	/* Copy the data */
-	chunksize = 0x100000; /* 1 MiB copy chunks */
-	offset = cp->offset;
-	remainder = cp->size;
-	destp = cp->cf->destp;
+    if (cp->cf->compare) {
+        readbuf = malloc(chunksize);
+        assert(readbuf);
+    }
 
-	if (cp->cf->compare) {
-		readbuf = malloc(chunksize);
-		assert(readbuf);
-	}
+    for (i = 0 ; remainder > 0; i++) {
+        ssize_t cur_chunksize = MIN(chunksize, remainder);
+        char *tmp_readbuf = &destp[offset];
 
-	for (i = 0 ; remainder > 0; i++) {
-		ssize_t cur_chunksize = MIN(chunksize, remainder);
-		char *tmp_readbuf = &destp[offset];
+        if (cp->verbose > 1)
+            printf("%s: %d copy %ld bytes at offset %lx\n",
+                   __func__, pid, cur_chunksize, offset);
 
-		if (cp->verbose > 1)
-			printf("%s: %d copy %ld bytes at offset %lx\n",
-			       __func__, pid, cur_chunksize, offset);
+        if (cp->cf->compare)
+            tmp_readbuf = readbuf;
 
-		if (cp->cf->compare)
-			tmp_readbuf = readbuf;
+        /* Read into mmapped destination for copy, or to a
+         * local buffer for compare */
+        bytes = pread(local_srcfd, tmp_readbuf, cur_chunksize,
+                  offset);
+        if (bytes < 0) {
+            fprintf(stderr, "%s: copy fail: "
+                "ofs %ld cur_chunksize %ld remainder %ld\n",
+                __func__, offset, cur_chunksize, remainder);
+            fprintf(stderr, "rc=%ld errno=%d\n", bytes, errno);
+            rc = -1;
+            goto out;
+        }
+        if (bytes < cur_chunksize) {
+            fprintf(stderr, "%s: short read: "
+                "ofs %ld cur_chunksize %ld remainder %ld\n",
+                __func__, offset, cur_chunksize, remainder);
+            assert(bytes == cur_chunksize);
+        }
 
-		/* Read into mmapped destination for copy, or to a
-		 * local buffer for compare */
-		bytes = pread(cp->cf->srcfd, tmp_readbuf, cur_chunksize,
-			      offset);
-		if (bytes < 0) {
-			fprintf(stderr, "%s: copy fail: "
-				"ofs %ld cur_chunksize %ld remainder %ld\n",
-				__func__, offset, cur_chunksize, remainder);
-			fprintf(stderr, "rc=%ld errno=%d\n", bytes, errno);
-			rc = -1;
-			goto out;
-		}
-		if (bytes < cur_chunksize) {
-			fprintf(stderr, "%s: short read: "
-				"ofs %ld cur_chunksize %ld remainder %ld\n",
-				__func__, offset, cur_chunksize, remainder);
-			assert(bytes == cur_chunksize);
-		}
+        if (cp->cf->compare) {
+            if (memcmp(&destp[offset], tmp_readbuf,
+                   cur_chunksize)) {
+                fprintf(stderr,
+                    "%s: %s: miscompare in chunk %d\n",
+                    __func__, cp->cf->destname, i);
+                rc = -1;
+                goto out;
+            }
+                    
+        }
+            
 
-		if (cp->cf->compare) {
-			if (memcmp(&destp[offset], tmp_readbuf,
-				   cur_chunksize)) {
-				fprintf(stderr,
-					"%s: %s: miscompare in chunk %d\n",
-					__func__, cp->cf->destname, i);
-				rc = -1;
-				goto out;
-			}
-					
-		}
-			
-
-		/* Update offset and remainder */
-		offset += bytes;
-		remainder -= bytes;
-	}
-	if (!cp->cf->compare) {
-		/* Flush the processor cache for the dest file */
-		flush_processor_cache(destp, cp->size);
-	}
+        /* Update offset and remainder */
+        offset += bytes;
+        remainder -= bytes;
+    }
+    if (!cp->cf->compare) {
+        /* Flush the processor cache for the dest file */
+        flush_processor_cache(destp, cp->size);
+    }
 out:
-	pthread_mutex_lock(&cp->cf->mutex);
-out_locked:
-	if (--cp->cf->refcount == 0) {
-		if (!rc)
-			printf("famfs %s: 100%%: %s\n",
-			       (cp->cf->compare) ? "compare" : "cp",
-			       cp->cf->destname);
-		else
-			fprintf(stderr, "famfs %s: error: %s\n",
-				(cp->cf->compare) ? "compare" : "cp",
-				cp->cf->destname);
-		cleanup++;
-	} else if (cp->verbose) {
-		int percent = ((cp->cf->nchunks - cp->cf->refcount) * 100) /
-			cp->cf->nchunks;
+    /* Close the local source file descriptor immediately */
+    if (local_srcfd >= 0)
+        close(local_srcfd);
 
-		printf("progress:  %02d%%: %s\n", percent, cp->cf->destname);
-	}
-	pthread_mutex_unlock(&cp->cf->mutex);
+    pthread_mutex_lock(&cp->cf->mutex);
+    if (--cp->cf->refcount == 0) {
+        if (!rc)
+            printf("famfs %s: 100%%: %s\n",
+                   (cp->cf->compare) ? "compare" : "cp",
+                   cp->cf->destname);
+        else
+            fprintf(stderr, "famfs %s: error: %s\n",
+                (cp->cf->compare) ? "compare" : "cp",
+                cp->cf->destname);
+        cleanup++;
+    } else if (cp->verbose) {
+        int percent = ((cp->cf->nchunks - cp->cf->refcount) * 100) /
+            cp->cf->nchunks;
 
-	if (rc)
-		fprintf(stderr, "famfs %s: error: %s\n",
-			(cp->cf->compare) ? "compare" : "cp",
-			cp->cf->destname);
+        printf("progress:  %02d%%: %s\n", percent, cp->cf->destname);
+    }
+    pthread_mutex_unlock(&cp->cf->mutex);
 
-	if (cleanup) {
-		/* cf is shared and can't be cleaned up until all threads
-		 * have finished with it */
+    if (rc)
+        fprintf(stderr, "famfs %s: error: %s\n",
+            (cp->cf->compare) ? "compare" : "cp",
+            cp->cf->destname);
 
-		flush_processor_cache(destp, cp->size);
+    if (cleanup) {
+        /* cf is shared and can't be cleaned up until all threads
+         * have finished with it */
 
-		free(cp->cf->srcname);
-		free(cp->cf->destname);
-		munmap(destp, cp->size);
-		if (cp->cf->srcfd > 0)
-			close(cp->cf->srcfd);
-		pthread_mutex_destroy(&cp->cf->mutex);
-		free(cp->cf);
-	}
-	free(cp); /* cp is not shared */
-	if (readbuf)
-		free(readbuf);
-	return rc;
+        flush_processor_cache(destp, cp->size);
+
+        free(cp->cf->srcname);
+        free(cp->cf->destname);
+        munmap(destp, cp->size);
+        /* No longer need to close cf->srcfd here since we use local FDs */
+        pthread_mutex_destroy(&cp->cf->mutex);
+        free(cp->cf);
+    }
+    free(cp); /* cp is not shared */
+    if (readbuf)
+        free(readbuf);
+    return rc;
 }
 
 /* This void/void wrapper is needed by the thread pool */
@@ -4511,6 +4508,10 @@ famfs_copy_file_data(
 			 MAP_SHARED, destfd, 0);
 	assert(cf->destp != MAP_FAILED);
 
+	/* Close destfd immediately after mmap - the mapping remains valid */
+    close(destfd);
+    cf->destfd = 0;
+
 	/* if thpool_add_work returns an error, fall back */
 	if (lp->thp) {
 		size_t remainder, offset, this_chunk;
@@ -4532,9 +4533,9 @@ famfs_copy_file_data(
 		 */
 
 		close(cf->srcfd);
-		close(cf->destfd);
+		// close(cf->destfd);
 		cf->srcfd = 0;
-		cf->destfd = 0;
+		// cf->destfd = 0;
 
 		if (verbose && nchunks > 1)
 			printf("famfs cp: %s: "
@@ -4670,6 +4671,10 @@ __famfs_cp(
 				__func__, srcfile, errno);
 		return 1;
 	}
+
+	/* Close immediately, threads will reopen as needed */
+	close(srcfd);  
+    srcfd = 0;
 
 	/* Create the destination file; if it exists and is the right size,
 	 * go ahead and copy into it...
